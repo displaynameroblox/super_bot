@@ -1,0 +1,5 @@
+{
+    "luau-lsp.studioPlugin.enabled": true,
+    "luau-lsp.studioPlugin.port": 34871,
+    "luau-lsp.completion.autocompleteEnd": true
+}
