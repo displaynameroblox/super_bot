@@ -1,1 +1,2 @@
-print("Hello world, from server!")
+local main = require(script.modules.main)
+main.start_server()
