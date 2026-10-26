@@ -15,3 +15,28 @@ rojo serve
 ```
 
 For more help, check out [the Rojo documentation](https://rojo.space/docs).
+
+## AI Terminal App
+
+Install the Python app dependencies with `python -m pip install -r Ai/requirements.txt`.
+Set `GEMINI_APT_KEY` in the repository's `.env` file, then start the session
+server with `python -m Ai.server`. By default, the server listens on all
+interfaces at port `8000` and advertises itself to Super Bot clients on the
+local network using UDP port `8766`. Set `HOST`, `PORT`, or `DISCOVERY_PORT` to
+override those values.
+
+Start a client with `python -m Ai.chat_app`. It discovers servers on the local
+network; if none are found, it asks for a server address. Use `/connect` to
+choose another server, `/new` to create a session, and `/login SESSION_ID` to
+join one. A session can be password-protected when it is created. Session data
+is held in server memory and is lost when the server stops. Passwords are
+stored as salted verifiers, while login tokens are saved in the client's local
+chat file. For each message, Gemini returns the chat reply and coding-request
+classification in one server-side model call. Recent chat context is bounded to
+reduce latency; actual response time still depends on Gemini and the network.
+
+UDP discovery only works on a reachable local subnet. For a server on another
+network, enter its reachable address manually; routers, firewalls, VPNs, and
+hotel/hotspot client isolation determine whether devices can connect. The
+default HTTP connection does not encrypt traffic, so use it only on trusted
+networks.

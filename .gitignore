@@ -4,5 +4,12 @@
 # Roblox Studio lock files
 /*.rbxlx.lock
 /*.rbxl.lock
+#.env files
+/*.env
+#idk???
+/*.vscode 
+
+# Testing files
+/*testing
 
 sourcemap.json

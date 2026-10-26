@@ -35,7 +35,7 @@ function self.test()
     targetpart.Anchored = true
     targetpart.CanCollide = true
     targetpart.Transparency = 0
-    targetpart.Position = Vector3.new(-11.14, 0.5, 18.94)
+    targetpart.Position = Vector3.new(-60.104, 0.5, 20.809)
     targetpart.Parent = workspace
 
     local moved, moveerror = char_handler.GoToPart(targetpart)
@@ -46,11 +46,12 @@ function self.test()
     end
 
     task.wait(10)
+    chat_handler.say("ima follow u ;3", model)
     local followResult, followError
     task.spawn(function()
         followResult, followError = char_handler.start_follow(players.LocalPlayer)
     end)
-    task.wait(20)
+    task.wait(40)
     char_handler.stop_follow()
     task.wait()
     if followResult ~= true then
@@ -58,13 +59,12 @@ function self.test()
         warn(message)
         return false, message
     end
-
     said, say_error = chat_handler.say("i want to test the api rq..", model)
     if not said then
         warn(say_error)
         return false, say_error
     end
-    task.wait(10)
+    task.wait()
     local apiTestOk, apiTestError = api:sent_server_command("##Test !M='server API test'")
     if not apiTestOk then
         warn(apiTestError)
