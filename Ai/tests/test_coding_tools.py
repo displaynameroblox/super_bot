@@ -1,4 +1,5 @@
 import json
+import curses
 import os
 import shlex
 import subprocess
@@ -8,23 +9,29 @@ import threading
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, Mock, call, patch
 
-from Ai import coding_tools
+from Ai import coding_tools, transport
+from Ai.protocol import CHAT_SKILLS, STYLE_PRESETS
 from Ai.chat_app import (
     ChatApp,
     ChatProfile,
     ChatSession,
     MAX_INITIAL_CHAT_LOG_LENGTH,
     ProfileStore,
+    ProgressUpdate,
     ServerError,
+    UIPreferences,
+    load_ui_preferences,
     normalize_server_url,
     request_json,
     load_profiles,
     load_sessions,
     save_profiles,
     save_sessions,
+    save_ui_preferences,
 )
 
 
@@ -89,27 +96,194 @@ class CodingToolsTests(unittest.TestCase):
             cancel_futures=True,
         )
 
-    def test_server_address_normalization_and_bearer_header(self) -> None:
+    def test_server_address_normalization_requires_https(self) -> None:
         self.assertEqual(
             normalize_server_url("192.168.1.20:8000"),
-            "http://192.168.1.20:8000",
+            "https://192.168.1.20:8000",
         )
-        with self.assertRaises(ValueError):
-            normalize_server_url("http://user:password@example.com")
+        self.assertEqual(
+            normalize_server_url("https://example.com:9000/"),
+            "https://example.com:9000",
+        )
+        self.assertEqual(normalize_server_url("  "), "")
+        for address in (
+            "http://user:password@example.com",
+            "https://user:password@example.com",
+            "https://example.com/path",
+        ):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError):
+                    normalize_server_url(address)
+        with self.assertRaisesRegex(ValueError, "HTTPS is required"):
+            normalize_server_url("http://192.168.1.20:8000")
 
-        response = Mock()
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        response.read.return_value = b"{}"
-        with patch("Ai.chat_app.urllib.request.urlopen", return_value=response) as urlopen:
-            request_json(
-                "http://192.168.1.20:8000",
+    def test_request_json_sends_the_token_inside_the_encrypted_call(self) -> None:
+        with patch(
+            "Ai.chat_app.transport.secure_request",
+            return_value=(200, {"ok": True}),
+        ) as secure_request:
+            result = request_json(
+                "https://192.168.1.20:8000",
                 "/chat",
                 {"msg": "hello"},
                 access_token="opaque-token",
             )
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.get_header("Authorization"), "Bearer opaque-token")
+            request_json("https://192.168.1.20:8000", "/chat/7", access_token="t")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(
+            secure_request.call_args_list[0],
+            call(
+                "https://192.168.1.20:8000",
+                "POST",
+                "/chat",
+                {"msg": "hello"},
+                "opaque-token",
+                timeout=ANY,
+            ),
+        )
+        self.assertEqual(secure_request.call_args_list[1].args[1], "GET")
+
+    def test_request_json_maps_server_and_transport_errors(self) -> None:
+        with patch(
+            "Ai.chat_app.transport.secure_request",
+            return_value=(404, {"detail": "Chat session not found"}),
+        ):
+            with self.assertRaises(ServerError) as missing:
+                request_json("https://192.168.1.20:8000", "/chat/9", access_token="t")
+        self.assertEqual(missing.exception.status_code, 404)
+        self.assertIn("Chat session not found", str(missing.exception))
+
+        with patch(
+            "Ai.chat_app.transport.secure_request",
+            side_effect=transport.UntrustedServer("The server has not been verified yet"),
+        ):
+            with self.assertRaises(ServerError) as untrusted:
+                request_json("https://192.168.1.20:8000", "/chat/9")
+        self.assertIsNone(untrusted.exception.status_code)
+        self.assertIn("not been verified", str(untrusted.exception))
+
+        with patch(
+            "Ai.chat_app.transport.secure_request",
+            return_value=(200, ["not", "an", "object"]),
+        ):
+            with self.assertRaises(ServerError):
+                request_json("https://192.168.1.20:8000", "/chat/9")
+
+    def test_ui_preferences_round_trip_and_legacy_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ui_preferences.json"
+            self.assertEqual(load_ui_preferences(path), UIPreferences())
+            preferences = UIPreferences(
+                show_progress=False,
+                show_navigation_help=False,
+            )
+            save_ui_preferences(path, preferences)
+            self.assertEqual(load_ui_preferences(path), preferences)
+
+    def test_keyboard_navigation_cycles_tabs_and_f_keys_jump_to_tab(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.active_tab = "Chat"
+        app.view_mode = "chat"
+        app.scroll_offset = 0
+        app.coding_scroll_offset = 0
+        app.action_menu_visible = False
+
+        app.handle_key("\t")
+        self.assertEqual(app.active_tab, "Activity")
+        app.handle_key(curses.KEY_LEFT)
+        self.assertEqual(app.active_tab, "Chat")
+        app.handle_key(curses.KEY_F0 + 4)
+        self.assertEqual(app.active_tab, "Coding")
+        app.handle_key(curses.KEY_F0 + 5)
+        self.assertEqual(app.active_tab, "Review")
+
+    def test_view_command_selects_each_tab_and_split(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.active_tab = "Chat"
+        app.view_mode = "chat"
+        app.scroll_offset = 0
+        app.coding_scroll_offset = 0
+        app.action_menu_visible = False
+        app.pending_message = ""
+
+        for view, expected_tab in (
+            ("activity", "Activity"),
+            ("coding", "Coding"),
+            ("review", "Review"),
+            ("chat", "Chat"),
+        ):
+            app.handle_command(f"/view {view}")
+            self.assertEqual(app.active_tab, expected_tab)
+            self.assertEqual(app.status, f"Changed view to {view}")
+        app.handle_command("/view split")
+        self.assertEqual(app.active_tab, "Chat")
+        self.assertEqual(app.view_mode, "split")
+
+    def test_activity_progress_expires_and_hides_own_updates(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.sessions = [
+            ChatSession(
+                local_id="own",
+                player_name="Host",
+                persona="Helpful",
+                chat_log="",
+                server_session_id=23,
+                access_token="own-token",
+            )
+        ]
+        app.active_index = 0
+        app.ui_preferences = UIPreferences(show_progress=False)
+        app.session_events = Queue()
+        own_id = app._active_participant_id()
+        app.progress_updates = {
+            own_id: ProgressUpdate(own_id, "Host", "thinking", "Private", 99),
+            "guest": ProgressUpdate("guest", "Guest", "thinking", "Working", 99),
+            "stale": ProgressUpdate("stale", "Old guest", "thinking", "", 30),
+            "finished": ProgressUpdate("finished", "Done", "complete", "", 94),
+        }
+
+        with patch("Ai.chat_app.time.monotonic", return_value=100):
+            app._poll_session_events()
+            lines = app._activity_panel_lines()
+
+        rendered = "\n".join(text for line in lines for text, _ in line)
+        self.assertIn("Guest", rendered)
+        self.assertNotIn("Private", rendered)
+        self.assertNotIn("Host · client", rendered)
+        self.assertNotIn("stale", app.progress_updates)
+        self.assertNotIn("finished", app.progress_updates)
+
+    def test_patch_review_shortcuts_do_not_consume_message_text(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.active_tab = "Review"
+        app.input_text = ""
+        app.future = None
+        app.action_menu_visible = False
+        app.help_visible = False
+        app._apply_agent_patch = Mock()
+        app._discard_agent_patch = Mock()
+
+        app.handle_key("a")
+        self.assertEqual(app.input_text, "a")
+        app.handle_key("\x01")
+        app.handle_key("\x04")
+
+        app._apply_agent_patch.assert_called_once_with()
+        app._discard_agent_patch.assert_called_once_with()
+
+    def test_f1_toggles_and_saves_navigation_hints(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.nav_help_visible = True
+        app.ui_preferences = UIPreferences()
+        app.ui_preferences_path = Path("unused")
+        app._save_ui_preferences = Mock()
+
+        app.handle_key(curses.KEY_F0 + 1)
+
+        self.assertFalse(app.nav_help_visible)
+        self.assertFalse(app.ui_preferences.show_navigation_help)
+        app._save_ui_preferences.assert_called_once_with()
 
     def test_legacy_saved_session_loads_without_auth_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -230,16 +404,10 @@ class CodingToolsTests(unittest.TestCase):
             self.assertEqual(tracked_file.read_text(encoding="utf-8"), "agent edit\n")
             self.assertEqual((workspace / "new.txt").read_text(encoding="utf-8"), "new file\n")
 
-    def test_gemini_planning_uses_brief_instruction_and_selected_skills(self) -> None:
-        fake_response = SimpleNamespace(text="1. Change the feature\n2. Test it")
-        generate_content = Mock(return_value=fake_response)
-        fake_client = SimpleNamespace(
-            models=SimpleNamespace(
-                generate_content=generate_content
-            )
-        )
+    def test_phone_model_planning_uses_brief_instruction_and_selected_skills(self) -> None:
+        phone_chat = Mock(return_value="1. Change the feature\n2. Test it")
         with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.object(coding_tools, "gemini_client", return_value=fake_client):
+            with patch.object(coding_tools.phone_model, "chat", phone_chat):
                 plan = coding_tools.make_plan(
                     Path(temp_dir),
                     "Add a health check",
@@ -251,10 +419,14 @@ class CodingToolsTests(unittest.TestCase):
                     chat_context="The user means the health-check project discussed earlier.",
                 )
         self.assertIn("Test it", plan)
-        prompt = generate_content.call_args.kwargs["contents"]
+        prompt = phone_chat.call_args.args[0][1]["content"]
         self.assertIn("Recent coding-mode request", prompt)
         self.assertIn("health-check project discussed earlier", prompt)
         self.assertIn("Recent normal-chat context:", prompt)
+        self.assertIn(
+            "implementation brief",
+            phone_chat.call_args.args[0][0]["content"],
+        )
 
     def test_coding_history_round_trips_and_rejects_malformed_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -284,8 +456,12 @@ class CodingToolsTests(unittest.TestCase):
                 "brief",
             )
 
-    def test_gemini_coding_detection_accepts_only_yes_or_no(self) -> None:
-        with patch.object(coding_tools, "ask_gemini", return_value=" YES\n") as ask:
+    def test_phone_model_coding_detection_accepts_only_yes_or_no(self) -> None:
+        with patch.object(
+            coding_tools,
+            "ask_phone_model",
+            return_value=" YES\n",
+        ) as ask:
             self.assertTrue(
                 coding_tools.detect_coding_request(
                     Path("/workspace"),
@@ -293,9 +469,9 @@ class CodingToolsTests(unittest.TestCase):
                     "## python\nUse tests.",
                 )
             )
-        self.assertIn("software", ask.call_args.args[1])
-        self.assertIn("Recent normal-chat context:", ask.call_args.args[2])
-        with patch.object(coding_tools, "ask_gemini", return_value="maybe"):
+        self.assertIn("software", ask.call_args.args[0])
+        self.assertIn("Recent normal-chat context:", ask.call_args.args[1])
+        with patch.object(coding_tools, "ask_phone_model", return_value="maybe"):
             with self.assertRaises(ValueError):
                 coding_tools.detect_coding_request(
                     Path("/workspace"),
@@ -304,22 +480,36 @@ class CodingToolsTests(unittest.TestCase):
                 )
 
     def test_coding_history_limits_context_and_excludes_normal_chat(self) -> None:
-        fake_response = SimpleNamespace(text="Implement the described feature.")
-        fake_client = SimpleNamespace(
-            models=SimpleNamespace(
-                generate_content=Mock(return_value=fake_response)
-            )
-        )
-        with patch.object(coding_tools, "gemini_client", return_value=fake_client):
+        phone_chat = Mock(return_value="Implement the described feature.")
+        with patch.object(coding_tools.phone_model, "chat", phone_chat):
             coding_tools.make_plan(
                 Path("/workspace"),
                 "Add feature",
                 [{"role": "user", "content": "Coding discussion only"}],
                 "## python\nUse tests.",
             )
-        prompt = fake_client.models.generate_content.call_args.kwargs["contents"]
+        prompt = phone_chat.call_args.args[0][1]["content"]
         self.assertIn("Coding discussion only", prompt)
         self.assertNotIn("normal chat transcript", prompt)
+
+    def test_phone_model_command_suggestion_uses_constrained_json_and_is_parsed(self) -> None:
+        phone_chat = Mock(return_value='{"command":"git status --short"}')
+        with patch.object(coding_tools.phone_model, "chat", phone_chat):
+            command = coding_tools.suggest_command(
+                Path("/workspace"),
+                "Show changed files",
+            )
+
+        self.assertEqual(command, "git status --short")
+        self.assertEqual(
+            phone_chat.call_args.kwargs["response_schema"],
+            {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        )
 
     def test_custom_skills_are_included_in_shared_skill_catalog(self) -> None:
         custom = {"my-style": "Prefer small functions and focused tests."}
@@ -360,10 +550,12 @@ class CodingToolsTests(unittest.TestCase):
         app.input_text = "Fix that issue we discussed"
         app.retry_due = None
         app.pending_message = ""
+        app.coding_only_mode = False
         app.coding_future = None
         app.coding_state = coding_tools.CodingState(
             coding_history=[{"role": "user", "content": "Earlier code task"}]
         )
+        app.ui_preferences = UIPreferences()
         app.skills = {}
         app.sessions = [
             ChatSession(
@@ -394,6 +586,7 @@ class CodingToolsTests(unittest.TestCase):
             "session-token",
         ))
         self.assertIn("Earlier code task", submitted.args[5])
+        self.assertTrue(submitted.args[6])
         self.assertIn("The earlier project discussion.", app.pending_message_chat_context)
 
     def test_server_classification_starts_coding_after_chat_reply(self) -> None:
@@ -427,6 +620,7 @@ class CodingToolsTests(unittest.TestCase):
             app.status = ""
             app.scroll_offset = 0
             app.coding_state = coding_tools.CodingState()
+            app.ui_preferences = UIPreferences()
             app.coding_state.coding_history = []
             app._confirm_coding_mode = Mock(return_value=True)
             app._start_plan = Mock()
@@ -464,6 +658,7 @@ class CodingToolsTests(unittest.TestCase):
         app.pending_message_chat_context = ""
         app.pending_message_coding_context = ""
         app.pending_message_can_start_coding = True
+        app.ui_preferences = UIPreferences()
         app.status = ""
         app.scroll_offset = 0
         app.coding_state = coding_tools.CodingState()
@@ -475,6 +670,165 @@ class CodingToolsTests(unittest.TestCase):
 
         app._confirm_coding_mode.assert_not_called()
         app._start_plan.assert_not_called()
+
+    def test_gemini_message_failure_offers_code_only_agent_fallback(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.future = Future()
+        app.future.set_exception(ServerError("Phone model is unavailable", 502))
+        app.pending_kind = "message"
+        app.pending_message = "Fix the build"
+        app.pending_message_session_id = 17
+        app.pending_message_chat_context = "Earlier coding discussion"
+        app.pending_message_coding_context = ""
+        app.pending_message_can_start_coding = True
+        app.retry_due = None
+        app.retry_delay_seconds = 5
+        app.coding_only_mode = False
+        app.code_only_queue = []
+        app.coding_state = coding_tools.CodingState(
+            command_template="copilot -p {prompt}",
+        )
+        app.coding_state.coding_history = []
+        app.skills = {}
+        app.workspace = Path("/workspace")
+        app.coding_future = None
+        app.agent_process = None
+        app.executor = Mock()
+        app.executor.submit.return_value = Future()
+        app.view_mode = "chat"
+        app._confirm_code_only_mode = Mock(return_value=True)
+        app._save_coding_state = Mock()
+        app.status = ""
+        app.scroll_offset = 0
+        app.sessions = []
+        app.data_file = Path("/tmp/super-bot-test-sessions.json")
+
+        with patch("Ai.chat_app.save_sessions"):
+            app._finish_pending_request()
+
+        self.assertTrue(app.coding_only_mode)
+        self.assertEqual(app.pending_message, "")
+        self.assertEqual(app.coding_future_kind, "agent_start")
+        app.executor.submit.assert_called_once()
+        self.assertIs(app.executor.submit.call_args.args[0], coding_tools.AgentProcess)
+        self.assertIn("Fix the build", app.executor.submit.call_args.args[2])
+
+    def test_gemini_rate_limit_offers_code_only_fallback(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.future = Future()
+        app.future.set_exception(ServerError("Phone model is rate limited", 429))
+        app.pending_kind = "message"
+        app.pending_message = "Fix the build"
+        app.pending_message_session_id = 17
+        app.pending_message_chat_context = ""
+        app.pending_message_coding_context = ""
+        app.pending_message_can_start_coding = True
+        app._enable_code_only_mode = Mock(return_value=True)
+        app.status = ""
+
+        app._finish_pending_request()
+
+        app._enable_code_only_mode.assert_called_once()
+        self.assertEqual(
+            app._enable_code_only_mode.call_args.args[1],
+            "Fix the build",
+        )
+        self.assertEqual(app.pending_message, "")
+
+    def test_declining_code_only_fallback_keeps_message_available_for_retry(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.future = Future()
+        app.future.set_exception(ServerError("Phone model is unavailable", 503))
+        app.pending_kind = "message"
+        app.pending_message = "Please fix this"
+        app.pending_message_session_id = 17
+        app.pending_message_chat_context = ""
+        app.pending_message_coding_context = ""
+        app.pending_message_can_start_coding = False
+        app.retry_due = None
+        app.retry_delay_seconds = 5
+        app._confirm_code_only_mode = Mock(return_value=False)
+        app._confirm_message_retry = Mock(return_value=True)
+        app.status = ""
+
+        with patch("Ai.chat_app.time.monotonic", return_value=100):
+            app._finish_pending_request()
+
+        self.assertEqual(app.pending_message, "Please fix this")
+        self.assertEqual(app.pending_message_session_id, 17)
+        self.assertEqual(app.retry_due, 105)
+
+    def test_failed_initial_gemini_greeting_can_continue_without_chat_session(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.future = Future()
+        app.future.set_exception(ServerError("Phone model could not start", 503))
+        app.pending_kind = "new"
+        app.pending_session_data = ("Alex", "Helpful")
+        app.coding_only_mode = False
+        app.sessions = []
+        app.active_index = -1
+        app._confirm_code_only_mode = Mock(return_value=True)
+        app.status = ""
+
+        app._finish_pending_request()
+
+        self.assertTrue(app.coding_only_mode)
+        self.assertIsNone(app.active_session)
+        self.assertIn("Code-only mode enabled", app.status)
+
+    def test_code_only_followup_waits_for_running_agent_and_patch_review(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.coding_only_mode = True
+        app.code_only_queue = []
+        app.agent_process = None
+        app.coding_future = Future()
+        app.coding_state = coding_tools.CodingState()
+        app.coding_state.coding_history = []
+        app._save_coding_state = Mock()
+        app.status = ""
+
+        app._submit_code_only_task("Also update the tests")
+
+        self.assertEqual(app.code_only_queue, ["Also update the tests"])
+        self.assertIn("Queued", app.status)
+        self.assertEqual(app.coding_state.coding_history, [])
+
+        app.coding_future = None
+        app.agent_process = None
+        app.coding_state.job_patch = "reviewable patch"
+        app._start_code_only_task = Mock()
+        app._start_next_code_only_task()
+        app._start_code_only_task.assert_not_called()
+
+        app.coding_state.job_patch = ""
+        app._start_code_only_task.return_value = True
+        app._start_next_code_only_task()
+        app._start_code_only_task.assert_called_once_with("Also update the tests")
+        self.assertEqual(app.code_only_queue, [])
+
+    def test_applying_patch_resumes_queued_code_only_task(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.coding_only_mode = True
+        app.code_only_queue = ["Continue with the next task"]
+        app.agent_process = None
+        app.coding_future = Future()
+        app.coding_future.set_result(None)
+        app.coding_future_kind = "apply_patch"
+        app.coding_state = coding_tools.CodingState(
+            job_patch="applied patch",
+            job_status="reviewing",
+        )
+        app._start_code_only_task = Mock(return_value=True)
+        app._save_coding_state = Mock()
+        app.coding_scroll_offset = 0
+
+        app._finish_coding_request()
+
+        app._start_code_only_task.assert_called_once_with(
+            "Continue with the next task"
+        )
+        self.assertEqual(app.code_only_queue, [])
+        self.assertEqual(app.coding_state.job_status, "applied")
 
     def test_confirm_mode_starts_agent_only_after_confirmation(self) -> None:
         app = ChatApp.__new__(ChatApp)
@@ -594,7 +948,8 @@ class CodingToolsTests(unittest.TestCase):
             app.pending_kind = ""
             app.pending_session_data = None
             app.pending_initial_chat_log = None
-            app._prompt = Mock(side_effect=["", ""])
+            app._prompt = Mock(side_effect=["", "", "", ""])
+            app.chat_skill_library = {}
 
             app.create_session()
 
@@ -610,6 +965,8 @@ class CodingToolsTests(unittest.TestCase):
                 "Player: Hello\nAI: Welcome back!",
                 None,
                 "",
+                "",
+                {},
             )
 
     def test_legacy_profile_without_chat_log_loads_with_empty_log(self) -> None:
@@ -675,6 +1032,55 @@ class CodingToolsTests(unittest.TestCase):
         app._handle_log_command("clear")
         self.assertIsNone(app.pending_initial_chat_log)
 
+    def test_profile_chat_log_is_displayed_and_sent_when_staged(self) -> None:
+        profile = ChatProfile(
+            "Alex",
+            "Friendly",
+            "Alex: Earlier conversation\nAI: Welcome back.",
+        )
+        app = ChatApp.__new__(ChatApp)
+        app.sessions = []
+        app.active_index = -1
+        app.profile_store = ProfileStore(
+            profiles={"Friends": profile},
+            selected="Friends",
+        )
+        app.pending_initial_chat_log = None
+        app.status = ""
+
+        def panel_text(lines: list[list[tuple[str, str]]]) -> str:
+            return " ".join(
+                " ".join(segment[0] for line in lines for segment in line).split()
+            )
+
+        profile_lines = app._chat_panel_lines(80)
+        self.assertIn("Earlier conversation", panel_text(profile_lines))
+
+        app._handle_log_command("load profile Friends")
+        staged_lines = app._chat_panel_lines(80)
+        self.assertIn("STARTING CHAT LOG", panel_text(staged_lines))
+        app.executor = Mock()
+        app.executor.submit.return_value = Future()
+        app.base_url = "http://localhost"
+        app.pending_kind = ""
+        app.pending_session_data = None
+        app._prompt = Mock(side_effect=["", "", "", ""])
+        app.chat_skill_library = {}
+
+        app.create_session()
+
+        app.executor.submit.assert_called_once_with(
+            unittest.mock.ANY,
+            "http://localhost",
+            "Alex",
+            "Friendly",
+            profile.chat_log,
+            None,
+            "",
+            "",
+            {},
+        )
+
     def test_explicitly_loaded_session_log_is_sent_to_new_session(self) -> None:
         app = ChatApp.__new__(ChatApp)
         app.profile_store = ProfileStore(profiles={})
@@ -683,7 +1089,10 @@ class CodingToolsTests(unittest.TestCase):
         app.executor.submit.return_value = Future()
         app.base_url = "http://localhost"
         app.status = ""
-        app._prompt = Mock(side_effect=["Alex", "Friendly assistant", "", ""])
+        app._prompt = Mock(
+            side_effect=["Alex", "Friendly assistant", "casual", "tutor, mine", "", ""]
+        )
+        app.chat_skill_library = {"mine": "My own skill."}
         app.pending_kind = ""
         app.pending_session_data = None
 
@@ -697,6 +1106,8 @@ class CodingToolsTests(unittest.TestCase):
             "Previously saved conversation",
             None,
             "",
+            STYLE_PRESETS["casual"],
+            {"tutor": CHAT_SKILLS["tutor"], "mine": "My own skill."},
         )
 
     def test_starting_chat_log_over_server_limit_is_rejected_explicitly(self) -> None:
@@ -758,6 +1169,7 @@ class CodingToolsTests(unittest.TestCase):
                 server_url="",
             )
         ]
+        app.ui_preferences = UIPreferences()
         app.status = ""
         app.executor = Mock()
         app.executor.submit.return_value = Future()
@@ -773,6 +1185,7 @@ class CodingToolsTests(unittest.TestCase):
             "hello",
             "session-token",
             "",
+            True,
         )
 
     def test_workspace_cannot_change_with_agent_patch_pending(self) -> None:
@@ -792,6 +1205,43 @@ class CodingToolsTests(unittest.TestCase):
             self.assertTrue(app.status.startswith("Error:"))
             app._save_coding_state.assert_not_called()
 
+    def test_suggest_handles_skills_missing_from_selected_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = ChatApp.__new__(ChatApp)
+            app.coding_future = None
+            app.coding_state = coding_tools.CodingState(skills=["old-workspace-skill"])
+            app.skills = {}
+            app.workspace = Path(temp_dir)
+            app.status = ""
+            app.executor = Mock()
+            app._save_coding_state = Mock()
+
+            app._suggest_task()
+
+        self.assertTrue(app.status.startswith("Error: Unknown skill"))
+        self.assertEqual(app.coding_state.plan_status, "idle")
+        app.executor.submit.assert_not_called()
+
+    def test_failed_agent_launch_keeps_reviewed_plan_runnable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = ChatApp.__new__(ChatApp)
+            app.coding_state = coding_tools.CodingState(
+                plan="Implement the change",
+                plan_workspace=temp_dir,
+                plan_status="reviewing",
+            )
+            app.skills = {}
+            app.workspace = Path(temp_dir)
+            app.agent_process = None
+            app.coding_future = Future()
+            app.status = ""
+            app._save_coding_state = Mock()
+
+            app._run_agent()
+
+        self.assertEqual(app.coding_state.plan_status, "reviewing")
+        self.assertTrue(app.status.startswith("Error: wait for the active coding task"))
+
     def test_coding_plan_is_reviewed_before_agent_task_is_queued(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app = ChatApp.__new__(ChatApp)
@@ -800,6 +1250,7 @@ class CodingToolsTests(unittest.TestCase):
                 command_template=f"{shlex.quote(sys.executable)} -c {{prompt}}",
                 skills=[],
             )
+            app.coding_only_mode = False
             app.workspace = Path(temp_dir)
             app.sessions = []
             app.active_index = -1

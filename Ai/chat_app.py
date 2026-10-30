@@ -1,177 +1,190 @@
 import argparse
 import curses
+import hashlib
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import http.client
 import json
 import os
 import re
 import shlex
 import socket
-import sys
 import subprocess
+import sys
 import textwrap
 import threading
 import time
-import urllib.error
-import urllib.request
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 from queue import Empty, Queue
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 try:
-    from . import coding_tools
+    from . import coding_tools, tls, transport
+    from .protocol import (
+        CHAT_SKILLS,
+        DISCOVERY_PORT,
+        DISCOVERY_REQUEST,
+        DISCOVERY_RESPONSE_PREFIX,
+        MAX_ACTIVE_CHAT_SKILLS,
+        MAX_SKILL_TEXT_LENGTH,
+        MAX_STYLE_LENGTH,
+        SKILL_NAME,
+        normalize_skills,
+        STYLE_PRESETS,
+    )
 except ImportError:
     import coding_tools
+    import tls
+    import transport
+    from protocol import (
+        CHAT_SKILLS,
+        DISCOVERY_PORT,
+        DISCOVERY_REQUEST,
+        DISCOVERY_RESPONSE_PREFIX,
+        MAX_ACTIVE_CHAT_SKILLS,
+        MAX_SKILL_TEXT_LENGTH,
+        MAX_STYLE_LENGTH,
+        SKILL_NAME,
+        normalize_skills,
+        STYLE_PRESETS,
+    )
 
 
 DEFAULT_URL = os.getenv("CHAT_SERVER_URL", "")
 REQUEST_TIMEOUT = 500 #too much??
 MAX_INITIAL_CHAT_LOG_LENGTH = 10_000
-DISCOVERY_PORT = 8766
-DISCOVERY_REQUEST = b"SUPER_BOT_DISCOVER_V1"
-DISCOVERY_RESPONSE_PREFIX = b"SUPER_BOT_SERVER_V1:"
 SPEAKER_LINE = re.compile(
     r"^(?:\[(?P<timestamp>[^\]]+)\]\s*)?"
     r"(?P<speaker>[^:\n]{1,100}):(?:\s?(?P<text>.*))?$"
 )
 ACTION_MARKUP = re.compile(r"(\*\*.*?\*\*|\*.*?\*)")
 HELP_TEXT = """\
-COMMANDS
+SUPER BOT HELP
 
-On launch, Super Bot shows a login prompt before opening the chat. Enter a
-session ID to join, or type NEW to create a session.
-
-/new
-Start a new conversation. Choose a saved profile or enter a player name and AI
-persona, then optionally choose a session ID and password.
-
-/login [SESSION_ID]
-Join a server session using its ID and optional password. If it does not exist,
-you can create it. Example: /login 23
-
-/connect
-Discover Super Bot servers on the local network, or enter a server address.
-Discovery is local-network only; enter a reachable address for other networks.
-
-/list
-Show locally saved conversations. The number shown is used with /open.
-
-/open
-Open the current conversation, or start a new session if none have been created.
-
-/open N
-Switch to a locally saved conversation by its number from /list.
-Example: /open 1
-
-/profile list
-List saved player/persona profiles.
-/profile save NAME
-Save the current conversation's player name, AI persona, and chat log.
-/profile use NAME
-Use a saved profile automatically when creating the next session.
-/profile clear
-Stop using the selected profile; /new will ask for details again.
-/profile delete NAME
-Delete a saved profile.
-
-/log load session N
-Use the chat log from a locally saved session as the starting history for /new.
-/log load profile NAME
-Use a profile's saved chat log as the starting history for /new.
-Quote profile names containing spaces, for example: /log load profile "Friendly cat".
-/log clear
-Clear the staged starting chat log.
-
-/retry cancel
-Cancel a message retry that is waiting for its backoff delay.
-After a send failure, the app asks before retrying; confirmed retries wait
-5 seconds, then 10, then 15, increasing by 5 seconds each time.
-
-/help
-Show this command guide.
-
-/quit
-Close the app.
-
-CODING MODE
-/code REQUEST
-Explicitly ask Gemini to prepare a coding brief from your request and coding-mode history.
-/refine FEEDBACK
-Discuss feedback with Gemini and update the brief. Use /plan to review it.
-/run
-Send the reviewed brief and selected skills to your configured coding CLI.
-/coding-mode brief|confirm|auto
-Choose how Gemini routes coding requests. brief prepares a brief only; confirm
-asks before starting the agent; auto starts the agent after preparing the brief.
-Auto mode still leaves patch review and application to you.
-Use /coding-mode without an argument to show the current setting.
-/status
-Show the current plan and coding-agent status.
-/diff
-Review the coding agent's isolated patch, or current workspace diff.
-/diff workspace
-Show the existing working-tree diff instead of the agent patch.
-/apply
-Apply the reviewed agent patch to the workspace after a safe conflict check.
-/discard
-Discard the agent patch without changing the workspace.
-/cancel
-Stop the active coding agent.
-/suggest
-Ask Gemini to suggest a bounded coding task for this workspace.
-
-/workspace [PATH]
-Choose the project root Gemini and coding agents should use. Without PATH,
-enter it when prompted. The selected folder is saved for the next launch.
-
-/agent list
-List supported coding CLIs and show which are installed.
-/agent use NAME
-Select copilot, claude, or codex.
-/agent configure
-Set the selected CLI command template; include {prompt} where the brief goes.
-/agent help
-Show the selected CLI's native --help output.
-/agent install NAME
-Show the selected provider's official installation page. Installation is manual.
-
-/skill list
-List built-in, discovered, and user-created skills.
-/skill use NAME
-Add a skill to Gemini's coding-request detection and brief, and the agent prompt.
-/skill create NAME INSTRUCTIONS
-Create a user skill shared by Gemini and any selected coding agent.
-/skill edit NAME INSTRUCTIONS
-Edit one of your custom skills.
-/skill delete NAME
-Delete one of your custom skills.
-/skill show NAME
-Show the full instructions for a built-in, discovered, or custom skill.
-/skill clear
-Clear selected skills.
-/view chat|coding|split
-Choose chat-focused, coding-focused, or split display.
-/command REQUEST
-Ask Gemini to propose one command. Review it, then use /approve or /reject.
-/approve
-Approve and run the displayed command without a shell in this workspace.
-/reject
-Reject the pending command proposal.
-
-CHAT AND NAVIGATION
+GET STARTED
+At launch, enter a session ID to join, or type NEW to create a session.
 Type a message and press Enter to send it to the selected conversation.
-Gemini checks whether ordinary messages are coding requests; if so, it asks
-before opening the coding workflow. Use /code to enter coding mode directly.
-Use Up/Down or Page Up/Page Down to scroll through the chat.
-Home scrolls to the beginning; End returns to the latest messages.
+/help                         Show this guide.
+/quit                         Close Super Bot.
 
-Conversations are saved locally after successful server responses. A session
-must still exist in the server's memory to send messages or log in to it.
-Coding agents run in the workspace and can change files. Review /diff; there are
-no automatic commits. Commands proposed by Gemini require explicit approval.
+SESSIONS AND CONVERSATIONS
+/new                          Start a session. Choose a saved profile or enter
+                              a player name and persona; session ID and password
+                              are optional.
+/login [SESSION_ID]            Join a session. If it does not exist, you can
+                              create it. Example: /login 23
+/connect                      Find a server on your local network or enter an
+                              address for a server elsewhere. Connections use
+                              HTTPS and end-to-end encryption; a new server's
+                              fingerprints are shown once for you to verify.
+/server                       Show the verified fingerprints of the current server.
+/server forget                Forget them, for example after the server's keys
+                              were reset on purpose; /connect verifies it again.
+/list                         List locally saved conversations.
+/open                         Open the current conversation, or create one if
+                              you have no saved sessions.
+/open N                       Switch to a saved conversation by its list number.
+
+PROFILES AND CHAT HISTORY
+/profile list                 List saved player/persona profiles.
+/profile save NAME            Save this conversation's player name, persona,
+                              and chat log as a profile.
+/profile use NAME             Use a saved profile the next time you create
+                              a session.
+/profile clear                Stop using the selected profile.
+/profile delete NAME          Delete a saved profile.
+/style [NAME|TEXT|off]        Set the AI's reply style for this session: a preset
+                              (casual, formal, playful, friendly, technical,
+                              concise) or your own words. /style lists presets;
+                              /style off clears it. Also asked at /new.
+/chatskill [list|use NAME|off NAME|clear|show NAME]
+                              Chat behaviours (up to 3 per session): roleplay
+                              (in-character *actions*), storyteller, copilot-brief
+                              (prepare a request for a coding agent), tutor, and
+                              your own. Asked at /new; use/off/clear change them
+                              mid-session (session host only).
+/chatskill create NAME TEXT   Save your own chat skill on this computer (500
+                              characters max). The server never stores your
+                              skill library; it is sent when you start a session.
+/chatskill delete NAME        Delete one of your saved chat skills.
+/log load session N           Use a saved session's chat log when creating
+                              your next session.
+/log load profile NAME        Use a profile's chat log when creating a session.
+                              Quote names with spaces, e.g. "Friendly cat".
+/log clear                    Clear the staged starting chat log.
+
+MESSAGES AND PROGRESS
+/retry cancel                 Cancel a message retry waiting for its next
+                              attempt. After a send failure, confirm to retry;
+                              delays increase by 5 seconds each time.
+/progress on|off              Show or hide progress for your own messages.
+                              The session host can always see everyone's progress.
+
+CODING WORKFLOW
+/code REQUEST                 Ask the phone model to prepare a coding brief.
+/refine FEEDBACK              Update the brief with your feedback.
+/run                          Send the reviewed brief to your coding CLI.
+/coding-mode brief|confirm|auto
+                              Choose how coding requests start: brief only,
+                              ask before starting, or start automatically.
+                              You always review and apply patches yourself.
+/status                       Show the current brief and agent status.
+/suggest                      Ask the phone model to suggest a bounded coding task.
+/coding-only [off]            Show or turn off code-only mode. In this mode,
+                              messages go to the coding agent; AI chat,
+                              planning, and command suggestions are unavailable.
+/workspace [PATH]             Choose the project folder for the AI and coding
+                              agents. The selection is saved for next time.
+
+PATCH REVIEW AND COMMANDS
+/diff                         Review the agent patch or workspace changes.
+/diff workspace               Show workspace changes instead of the agent patch.
+/apply                        Apply the reviewed patch after a conflict check.
+/discard                      Discard the isolated patch without changing files.
+/cancel                       Stop the active coding agent.
+In Review, Ctrl+A applies the patch; Ctrl+D discards it.
+/command REQUEST              Ask the phone model to suggest a command.
+/approve                      Approve and run the suggested command.
+/reject                       Reject the suggested command.
+AI-proposed commands are never run without your approval.
+
+AGENTS AND SKILLS
+/agent list                   List supported coding CLIs and show which are
+                              installed.
+/agent use NAME               Select copilot, claude, or codex.
+/agent configure              Set the CLI command template. Include {prompt}
+                              where the coding brief should be inserted.
+/agent help                   Show the selected CLI's --help output.
+/agent install NAME           Install the CLI after you review and confirm the
+                              exact commands (npm/pipx; Cursor Agent is
+                              manual). Missing npm/pipx is added via
+                              Homebrew or Termux pkg when available.
+/skill list                   List built-in, discovered, and custom skills.
+/skill use NAME               Add a skill to request detection and agent prompts.
+/skill create NAME INSTRUCTIONS
+                              Create a skill shared by the AI and coding agents.
+/skill edit NAME INSTRUCTIONS Edit one of your custom skills.
+/skill delete NAME            Delete one of your custom skills.
+/skill show NAME              Show a skill's full instructions.
+/skill clear                  Clear selected skills.
+
+VIEWS AND KEYBOARD
+/view chat|activity|coding|review|split
+                              Switch views. Split shows chat and coding together.
+Tab/Shift+Tab or Left/Right   Switch tabs; F2-F5 jump directly to a tab.
+F6                            Toggle split view. F1 shows or hides navigation help.
+Ctrl+P                         Open the action menu.
+Up/Down or Page Up/Page Down  Scroll the current view. Home goes to the beginning;
+                              End returns to the latest content.
+
+NOTES
+Conversations are saved locally after successful server responses. The server
+must still have a session in memory for you to join or send messages.
+Coding agents can change files in the selected workspace. Review changes before
+applying them; Super Bot does not create commits automatically.
 """
 
 
@@ -197,6 +210,7 @@ class ChatSession:
     server_session_id: int
     access_token: str = ""
     server_url: str = ""
+    chat_skills: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -212,14 +226,46 @@ class ProfileStore:
     selected: str = ""
 
 
+@dataclass
+class UIPreferences:
+    show_progress: bool = True
+    show_navigation_help: bool = True
+
+
+@dataclass
+class ProgressUpdate:
+    participant_id: str
+    player_name: str
+    phase: str
+    detail: str
+    updated_at: float
+
+
+PROGRESS_LABELS = {
+    "received": "Received by server",
+    "queued": "Queued at server",
+    "thinking": "Thinking",
+    "gathering_context": "Gathering context",
+    "drafting_reply": "Drafting reply",
+    "finalizing": "Finalizing reply",
+    "complete": "Reply received",
+    "failed": "Request failed",
+}
+TABS = ("Chat", "Activity", "Coding", "Review")
+PROGRESS_ACTIVE_TTL_SECONDS = 60
+PROGRESS_TERMINAL_TTL_SECONDS = 5
+TERMINAL_PROGRESS_PHASES = {"complete", "failed"}
+
+
 def default_data_file() -> Path:
-    if sys.platform == "darwin":
-        data_dir = Path.home() / "Library" / "Application Support" / "super_bot"
-    elif os.name == "nt":
-        data_dir = Path(os.getenv("APPDATA", Path.home())) / "super_bot"
-    else:
-        data_dir = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local/share")) / "super_bot"
-    return data_dir / "chat_sessions.json"
+    return tls.app_data_dir() / "chat_sessions.json"
+
+
+def upgrade_legacy_server_url(url: str) -> str:
+    """Chats saved before HTTPS was enforced hold http:// addresses of the same server."""
+    if url[:7].casefold() == "http://":
+        return f"https://{url[7:]}"
+    return url
 
 
 def load_sessions(path: Path) -> list[ChatSession]:
@@ -251,6 +297,13 @@ def load_sessions(path: Path) -> list[ChatSession]:
         server_url = item.get("server_url", "")
         if not isinstance(access_token, str) or not isinstance(server_url, str):
             raise ValueError(f"Saved chat #{index} in {path} has invalid session access data")
+        server_url = upgrade_legacy_server_url(server_url)
+        chat_skills = item.get("chat_skills", {})
+        if not isinstance(chat_skills, dict) or not all(
+            isinstance(name, str) and isinstance(text, str)
+            for name, text in chat_skills.items()
+        ):
+            raise ValueError(f"Saved chat #{index} in {path} has invalid chat skills")
         session_data = {
             key: value
             for key, value in item.items()
@@ -280,6 +333,56 @@ def save_sessions(path: Path, sessions: list[ChatSession]) -> None:
     except OSError:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def load_chat_skills(path: Path) -> dict[str, str]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read chat skills at {path}: {exc}") from exc
+    if not isinstance(raw, dict) or not all(
+        isinstance(name, str) and isinstance(text, str) for name, text in raw.items()
+    ):
+        raise ValueError(f"Chat skills at {path} must be a JSON object of text values")
+    return raw
+
+
+def save_chat_skills(path: Path, skills: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(skills, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.chmod(0o600)
+        temporary_path.replace(path)
+        path.chmod(0o600)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def response_skills(response: dict[str, Any]) -> dict[str, str]:
+    skills = response.get("AI_skills")
+    if isinstance(skills, dict) and all(
+        isinstance(name, str) and isinstance(text, str) for name, text in skills.items()
+    ):
+        return dict(skills)
+    return {}
+
+
+def parse_chat_skills(text: str, available: dict[str, str]) -> dict[str, str]:
+    """Turn a comma/space separated list of skill names into name -> instructions."""
+    names = [name.casefold() for name in re.split(r"[,\s]+", text.strip()) if name]
+    unknown = [name for name in names if name not in available]
+    if unknown:
+        raise ValueError(
+            f"Unknown chat skill: {', '.join(unknown)}. Available: {', '.join(available)}"
+        )
+    return normalize_skills({name: available[name] for name in dict.fromkeys(names)})
 
 
 def load_profiles(path: Path) -> ProfileStore:
@@ -337,42 +440,113 @@ def save_profiles(path: Path, store: ProfileStore) -> None:
         raise
 
 
+def load_ui_preferences(path: Path) -> UIPreferences:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return UIPreferences()
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read UI preferences at {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"UI preferences at {path} must contain a JSON object")
+    return UIPreferences(
+        show_progress=(
+            raw["show_progress"]
+            if isinstance(raw.get("show_progress"), bool)
+            else True
+        ),
+        show_navigation_help=(
+            raw["show_navigation_help"]
+            if isinstance(raw.get("show_navigation_help"), bool)
+            else True
+        ),
+    )
+
+
+def save_ui_preferences(path: Path, preferences: UIPreferences) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(asdict(preferences), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.chmod(0o600)
+        temporary_path.replace(path)
+        path.chmod(0o600)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def request_json(
     base_url: str,
     endpoint: str,
     payload: dict[str, object] | None = None,
     access_token: str = "",
 ) -> dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
-    headers = {"Content-Type": "application/json"} if body is not None else {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
-    request = urllib.request.Request(
-        f"{base_url.rstrip('/')}{endpoint}",
-        data=body,
-        headers=headers,
-        method="POST" if body is not None else "GET",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read().decode("utf-8")).get("detail", str(exc))
-        except (UnicodeError, json.JSONDecodeError, AttributeError):
-            detail = str(exc)
+        status, result = transport.secure_request(
+            base_url,
+            "POST" if payload is not None else "GET",
+            endpoint,
+            payload,
+            access_token,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except transport.TransportError as exc:
+        raise ServerError(str(exc)) from exc
+    if status >= 400:
+        detail = result.get("detail") if isinstance(result, dict) else None
         raise ServerError(
-            f"Server returned HTTP {exc.code}: {detail}",
-            status_code=exc.code,
-        ) from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise ServerError(f"Could not reach the server: {exc}") from exc
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ServerError(f"Server returned invalid JSON: {exc}") from exc
-
+            f"Server returned HTTP {status}: "
+            f"{detail if detail is not None else http.client.responses.get(status, 'error')}",
+            status_code=status,
+        )
     if not isinstance(result, dict):
         raise ServerError("Server returned an unexpected response")
     return result
+
+
+def resolve_style(text: str) -> str:
+    """Turn a preset name or free text into the style sent to the server."""
+    cleaned = " ".join(text.split())
+    if cleaned.casefold() in {"", "off", "none", "default"}:
+        return ""
+    preset = STYLE_PRESETS.get(cleaned.casefold())
+    if preset is not None:
+        return preset
+    if len(cleaned) > MAX_STYLE_LENGTH:
+        raise ValueError(f"Style must be at most {MAX_STYLE_LENGTH} characters")
+    return cleaned
+
+
+def set_session_style(
+    base_url: str,
+    session_id: int,
+    style: str,
+    access_token: str,
+) -> dict[str, Any]:
+    return request_json(
+        base_url,
+        "/style",
+        {"ses_id": session_id, "style": style},
+        access_token=access_token,
+    )
+
+
+def set_session_skills(
+    base_url: str,
+    session_id: int,
+    skills: dict[str, str],
+    access_token: str,
+) -> dict[str, Any]:
+    return request_json(
+        base_url,
+        "/skills",
+        {"ses_id": session_id, "skills": skills},
+        access_token=access_token,
+    )
 
 
 def start_remote_session(
@@ -382,6 +556,8 @@ def start_remote_session(
     chat_log: str = "",
     session_id: int | None = None,
     password: str = "",
+    style: str = "",
+    skills: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return request_json(
         base_url,
@@ -392,6 +568,8 @@ def start_remote_session(
             "Chat_log": chat_log,
             "session_ID": session_id,
             "password": password,
+            "AI_style": style,
+            "AI_skills": skills or {},
         },
     )
 
@@ -414,6 +592,7 @@ def send_message(
     message: str,
     access_token: str,
     coding_context: str = "",
+    show_progress: bool = True,
 ) -> dict[str, Any]:
     return request_json(
         base_url,
@@ -422,6 +601,7 @@ def send_message(
             "ses_id": session_id,
             "msg": message,
             "coding_context": coding_context,
+            "show_progress": show_progress,
         },
         access_token=access_token,
     )
@@ -489,7 +669,7 @@ def discover_servers(timeout: float = 1.5) -> list[str]:
                 except (UnicodeError, ValueError):
                     continue
                 if 1 <= port <= 65535:
-                    found.add(f"http://{address}:{port}")
+                    found.add(f"https://{address}:{port}")
     except OSError:
         return []
     return sorted(found)
@@ -500,10 +680,14 @@ def normalize_server_url(address: str) -> str:
     if not value:
         return ""
     if "://" not in value:
-        value = f"http://{value}"
+        value = f"https://{value}"
     parsed = urlsplit(value)
+    if parsed.scheme == "http":
+        raise ValueError(
+            "HTTPS is required: use https://HOST:PORT (plain HTTP is not supported)"
+        )
     if (
-        parsed.scheme not in {"http", "https"}
+        parsed.scheme != "https"
         or not parsed.netloc
         or parsed.username is not None
         or parsed.password is not None
@@ -528,8 +712,8 @@ def session_event_worker(
     stop_event: threading.Event,
 ) -> None:
     try:
+        import websockets.sync.client  # noqa: F401
         from websockets.exceptions import WebSocketException
-        from websockets.sync.client import connect
     except ImportError:
         events.put(
             {
@@ -539,37 +723,28 @@ def session_event_worker(
         )
         return
 
-    parsed = urlsplit(base_url)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    websocket_url = urlunsplit(
-        (scheme, parsed.netloc, f"/events/{session_id}", "", "")
-    )
     error_reported = False
     while not stop_event.is_set():
         try:
-            with connect(
-                websocket_url,
-                additional_headers={"Authorization": f"Bearer {access_token}"},
-                open_timeout=5,
-                close_timeout=1,
-            ) as websocket:
+            with transport.open_event_stream(
+                base_url, session_id, access_token
+            ) as stream:
                 error_reported = False
                 while not stop_event.is_set():
-                    try:
-                        payload = websocket.recv(timeout=1)
-                    except TimeoutError:
-                        continue
-                    if isinstance(payload, str):
-                        try:
-                            event = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(event, dict) and all(
-                            isinstance(key, str) and isinstance(value, str)
-                            for key, value in event.items()
-                        ):
-                            events.put(event)
-        except (OSError, TimeoutError, WebSocketException) as exc:
+                    event = stream.recv(timeout=1)
+                    if isinstance(event, dict) and all(
+                        isinstance(key, str) and isinstance(value, str)
+                        for key, value in event.items()
+                    ):
+                        events.put(event)
+        except (
+            transport.UntrustedServer,
+            transport.InsecureServerUrl,
+            transport.ServerIdentityChanged,
+        ) as exc:
+            events.put({"type": "error", "text": str(exc)})
+            return
+        except (OSError, TimeoutError, WebSocketException, transport.TransportError) as exc:
             if stop_event.is_set():
                 return
             if not error_reported:
@@ -647,6 +822,7 @@ class ChatApp:
         self.screen = screen
         self.base_url = base_url.strip()
         self.data_file = data_file
+        transport.configure_trust_store(data_file.with_name("known_servers.json"))
         self.sessions = load_sessions(data_file)
         self.active_index = len(self.sessions) - 1
         self.input_text = ""
@@ -654,7 +830,22 @@ class ChatApp:
         self.scroll_offset = 0
         self.coding_scroll_offset = 0
         self.help_visible = False
-        self.view_mode = "split"
+        self.nav_help_visible = True
+        self.active_tab = "Chat"
+        self.view_mode = "chat"
+        self.action_menu_visible = False
+        self.action_menu_index = 0
+        self.action_menu_items = (
+            ("Chat", "Switch to chat"),
+            ("Activity", "View session progress"),
+            ("Coding", "View coding task and agent"),
+            ("Review", "Review pending agent patch"),
+            ("Split", "Toggle chat and coding split"),
+            ("New session", "Create a conversation"),
+            ("Help", "Open command guide"),
+        )
+        self.tab_hit_targets: list[tuple[str, int, int]] = []
+        self.mouse_enabled = False
         self.future: Future[dict[str, Any]] | None = None
         self.pending_kind = ""
         self.pending_session_data: tuple[str, str] | None = None
@@ -664,11 +855,21 @@ class ChatApp:
         self.pending_message_chat_context = ""
         self.pending_message_coding_context = ""
         self.pending_message_can_start_coding = False
+        self.message_progress = ""
+        self.progress_updates: dict[str, ProgressUpdate] = {}
+        self.coding_only_mode = False
+        self.code_only_queue: list[str] = []
+        self.pending_model_fallback_task = ""
         self.retry_delay_seconds = 5
         self.retry_due: float | None = None
         self.coding_data_path = data_file.with_name("coding_state.json")
         self.profiles_path = data_file.with_name("chat_profiles.json")
+        self.ui_preferences_path = data_file.with_name("ui_preferences.json")
+        self.chat_skills_path = data_file.with_name("chat_skills.json")
+        self.chat_skill_library = load_chat_skills(self.chat_skills_path)
         self.profile_store = load_profiles(self.profiles_path)
+        self.ui_preferences = load_ui_preferences(self.ui_preferences_path)
+        self.nav_help_visible = self.ui_preferences.show_navigation_help
         self.coding_state = coding_tools.load_coding_state(self.coding_data_path)
         default_workspace = Path(__file__).resolve().parent.parent
         configured_workspace = workspace or (
@@ -720,9 +921,128 @@ class ChatApp:
         else:
             self.status = "No coding CLI detected; Copilot is the default. Use /agent install copilot."
         if self.command_confirmation:
-            self.status = "A saved Gemini command awaits your explicit /approve or /reject."
+            self.status = "A saved AI command awaits your explicit /approve or /reject."
 
     def _connect_to_server(self) -> bool:
+        previous_url = self.base_url
+        if not self._select_server():
+            return False
+        if self._verify_server(self.base_url):
+            return True
+        self.base_url = previous_url
+        return False
+
+    def _verify_server(self, url: str) -> bool:
+        self.status = f"Verifying {url}…"
+        try:
+            check = transport.check_server(url)
+        except transport.TransportError as exc:
+            self.status = f"Error: {exc}"
+            return False
+        if check.state == "changed":
+            self._confirm_lines(
+                "SERVER IDENTITY CHANGED",
+                [
+                    check.reason,
+                    "Someone may be intercepting your connection, or the server's keys "
+                    "were reset. Compare with the fingerprints the server printed:",
+                    *transport.describe_server(check.info),
+                    "If you expected this, close this screen, use /server forget, then "
+                    "/connect again.",
+                ],
+                "Connection refused. Press any key to continue. ",
+                4,
+            )
+            self.status = "Error: the server's identity changed; connection refused"
+            return False
+        if check.state == "new":
+            if not self._confirm_lines(
+                "VERIFY SERVER",
+                [
+                    "First connection to this server. Compare these fingerprints with "
+                    "the ones the server printed when it started:",
+                    *transport.describe_server(check.info),
+                ],
+                "Trust this server and remember it? [y/N] ",
+                3,
+            ):
+                self.status = "Server was not trusted; connection cancelled"
+                return False
+            try:
+                transport.trust_store().pin(url, check.info)
+            except (OSError, transport.TransportError) as exc:
+                self.status = f"Error: could not save the trusted server: {exc}"
+                return False
+        self.status = f"Connected to {url} (verified, end-to-end encrypted)"
+        return True
+
+    def _confirm_lines(
+        self,
+        title: str,
+        lines: list[str],
+        prompt: str,
+        color: int,
+    ) -> bool:
+        height, width = self.screen.getmaxyx()
+        text_width = max(10, width - 4)
+        self.screen.timeout(-1)
+        try:
+            self.screen.erase()
+            self._put(0, 2, f" {title} ", curses.A_BOLD | self._color(color))
+            row = 2
+            for line in lines:
+                for wrapped in textwrap.wrap(line, text_width, subsequent_indent="  ") or [""]:
+                    if row >= height - 3:
+                        break
+                    self._put(row, 2, wrapped)
+                    row += 1
+            prompt_row = min(height - 2, row + 1)
+            self._put(prompt_row, 2, prompt[: max(1, width - 4)])
+            self.screen.move(prompt_row, min(width - 2, 2 + len(prompt)))
+            self.screen.refresh()
+            answer = self.screen.get_wch()
+            return isinstance(answer, str) and answer.casefold() == "y"
+        except curses.error:
+            return False
+        finally:
+            self.screen.timeout(100)
+
+    def _handle_server_command(self, argument: str) -> None:
+        session = self.active_session
+        url = (session.server_url if session is not None else "") or self.base_url
+        if not url:
+            self.status = "Error: not connected to a server"
+            return
+        action = argument.casefold()
+        if action not in {"", "forget"}:
+            self.status = "Error: use /server or /server forget"
+            return
+        try:
+            address = transport.parse_server_url(url).key
+            if action == "forget":
+                forgotten = transport.trust_store().forget(url)
+                self.status = (
+                    f"Forgot {address}; use /connect to verify it again"
+                    if forgotten
+                    else f"{address} was not verified, so there is nothing to forget"
+                )
+                return
+            pinned = transport.trust_store().get(url)
+        except transport.TransportError as exc:
+            self.status = f"Error: {exc}"
+            return
+        if pinned is None:
+            self.status = f"{address} is not verified yet; use /connect"
+            return
+        self._confirm_lines(
+            "SERVER",
+            transport.describe_pinned(url, pinned),
+            "Press any key to continue. ",
+            1,
+        )
+        self.status = f"{address}: verified, HTTPS and end-to-end encryption"
+
+    def _select_server(self) -> bool:
         try:
             servers = discover_servers()
         except ValueError as exc:
@@ -766,6 +1086,7 @@ class ChatApp:
 
     def _start_session_events(self) -> None:
         self._stop_session_events()
+        self.progress_updates.clear()
         session = self.active_session
         if session is None or not session.access_token:
             return
@@ -789,14 +1110,54 @@ class ChatApp:
         self.session_event_stop.set()
         self.session_event_thread = None
 
+    def _active_participant_id(self) -> str:
+        session = self.active_session
+        if session is None or not session.access_token:
+            return ""
+        return hashlib.sha256(session.access_token.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _format_progress(phase: str, detail: str = "") -> str:
+        label = PROGRESS_LABELS.get(phase, "Working")
+        return f"{label} · {detail}" if detail else label
+
     def _poll_session_events(self) -> None:
+        now = time.monotonic()
+        for participant_id, update in tuple(self.progress_updates.items()):
+            ttl = (
+                PROGRESS_TERMINAL_TTL_SECONDS
+                if update.phase in TERMINAL_PROGRESS_PHASES
+                else PROGRESS_ACTIVE_TTL_SECONDS
+            )
+            if now - update.updated_at >= ttl:
+                del self.progress_updates[participant_id]
         while True:
             try:
                 event = self.session_events.get_nowait()
             except Empty:
                 return
             event_type = event.get("type", "")
-            if event_type == "message":
+            if event_type == "progress":
+                participant_id = event.get("participant_id", "")
+                phase = event.get("phase", "")
+                player_name = event.get("player_name", "A client")
+                if participant_id not in self.progress_updates:
+                    self.progress_updates[participant_id] = ProgressUpdate(
+                        participant_id=participant_id,
+                        player_name=player_name,
+                        phase=phase,
+                        detail=event.get("detail", ""),
+                        updated_at=time.monotonic(),
+                    )
+                else:
+                    update = self.progress_updates[participant_id]
+                    update.phase = phase
+                    update.detail = event.get("detail", "")
+                    update.updated_at = time.monotonic()
+                    update.player_name = player_name
+                if participant_id == self._active_participant_id():
+                    self.message_progress = self._format_progress(phase, event.get("detail", ""))
+            elif event_type == "message":
                 session = self.active_session
                 chat_log = event.get("chat_log")
                 if (
@@ -830,7 +1191,7 @@ class ChatApp:
             if session_text.casefold() == "new":
                 self.create_session()
                 self._wait_for_startup_request()
-                return self.active_session is not None
+                return self.active_session is not None or self.coding_only_mode
             if not session_text.isdigit() or int(session_text) < 1:
                 self.status = "Error: session ID must be a positive integer, or type NEW"
                 continue
@@ -871,10 +1232,22 @@ class ChatApp:
         except OSError as exc:
             self.status = f"Error saving coding state: {exc}"
 
+    def _save_ui_preferences(self) -> None:
+        try:
+            save_ui_preferences(self.ui_preferences_path, self.ui_preferences)
+        except OSError as exc:
+            self.status = f"Error saving UI preferences: {exc}"
+
     def _setup_screen(self) -> None:
         curses.curs_set(0)
         self.screen.keypad(True)
         self.screen.timeout(100)
+        try:
+            self.mouse_enabled = bool(
+                curses.mousemask(curses.ALL_MOUSE_EVENTS)[0]
+            )
+        except curses.error:
+            self.mouse_enabled = False
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
@@ -918,12 +1291,12 @@ class ChatApp:
     def draw(self) -> None:
         self.screen.erase()
         height, width = self.screen.getmaxyx()
-        if height < 10 or width < 50:
-            self._put(0, 0, "Resize the terminal to at least 50 columns by 10 rows.")
+        if height < 12 or width < 50:
+            self._put(0, 0, "Resize the terminal to at least 50 columns by 12 rows.")
             self.screen.refresh()
             return
 
-        self._put(0, 2, " SUPER BOT  /  CHAT ", curses.A_BOLD | self._color(1))
+        self._put(0, 2, " SUPER BOT ", curses.A_BOLD | self._color(1))
         session = self.active_session
         if session is None:
             subtitle = "No session selected"
@@ -936,32 +1309,50 @@ class ChatApp:
             subtitle = "Command guide  ·  ↑/↓ scroll  ·  Esc close"
         elif self.agent_process is not None:
             subtitle += f"  ·  {self.coding_state.provider} agent running"
+        if (
+            not self.help_visible
+            and (
+                self.coding_state.plan_status != "idle"
+                or self.coding_state.job_status != "idle"
+            )
+        ):
+            subtitle += (
+                f"  ·  Coding {self.coding_state.plan_status}"
+                f" / agent {self.coding_state.job_status}"
+            )
         self._put(1, 2, subtitle, self._color(1))
-        self._put(2, 1, "─" * (width - 2), curses.A_DIM)
+        self._draw_tabs(width)
+        self._put(3, 1, "─" * (width - 2), curses.A_DIM)
 
-        body_top = 3
-        body_height = height - 7
+        body_top = 4
+        footer_top = height - (6 if self.nav_help_visible else 5)
+        body_height = max(1, footer_top - body_top)
         if self.help_visible:
-            lines = [[(line, "normal")] for line in self._wrapped_lines(HELP_TEXT, width - 6)]
+            lines = [
+                [(line, "normal")]
+                for line in self._wrapped_lines(HELP_TEXT, width - 6)
+            ]
             self.scroll_offset = min(self.scroll_offset, max(0, len(lines) - body_height))
             end = max(0, len(lines) - self.scroll_offset)
             start = max(0, end - body_height)
             for row, line in enumerate(lines[start:end], start=body_top):
                 self._draw_rich_line(row, 3, line, width - 6)
-        elif self.view_mode == "split" and width >= 90:
+        elif self.action_menu_visible:
+            pass
+        elif self.active_tab == "Chat" and self.view_mode == "split" and width >= 90:
             column_width = (width - 5) // 2
-            self._put(body_top, 2, " CHAT ", curses.A_BOLD | self._color(1))
+            content_top = body_top + 1
+            content_height = max(1, body_height - 1)
+            self._put(body_top, 2, " CONVERSATION ", curses.A_BOLD | self._color(1))
             self._put(
                 body_top,
                 column_width + 3,
-                " CODING / AGENT ",
+                " CODING ACTIVITY ",
                 curses.A_BOLD | self._color(2),
             )
             separator_x = column_width + 1
-            for row in range(body_top + 1, height - 4):
+            for row in range(content_top, footer_top):
                 self._put(row, separator_x, "│", curses.A_DIM)
-            content_top = body_top + 1
-            content_height = height - content_top - 4
             chat_lines = self._chat_panel_lines(column_width - 3)
             coding_lines = self._coding_panel_lines(column_width - 3)
             self.scroll_offset = min(
@@ -987,8 +1378,26 @@ class ChatApp:
                     line,
                     width - column_width - 5,
                 )
-        elif self.view_mode == "coding":
+        elif self.active_tab == "Coding":
             lines = self._coding_panel_lines(width - 6)
+            self.coding_scroll_offset = min(
+                self.coding_scroll_offset, max(0, len(lines) - body_height)
+            )
+            end = max(0, len(lines) - self.coding_scroll_offset)
+            start = max(0, end - body_height)
+            for row, line in enumerate(lines[start:end], start=body_top):
+                self._draw_rich_line(row, 3, line, width - 6)
+        elif self.active_tab == "Activity":
+            lines = self._activity_panel_lines()
+            self.scroll_offset = min(
+                self.scroll_offset, max(0, len(lines) - body_height)
+            )
+            end = max(0, len(lines) - self.scroll_offset)
+            start = max(0, end - body_height)
+            for row, line in enumerate(lines[start:end], start=body_top):
+                self._draw_rich_line(row, 3, line, width - 6)
+        elif self.active_tab == "Review":
+            lines = self._review_panel_lines()
             self.coding_scroll_offset = min(
                 self.coding_scroll_offset, max(0, len(lines) - body_height)
             )
@@ -1004,35 +1413,249 @@ class ChatApp:
             for row, line in enumerate(lines[start:end], start=body_top):
                 self._draw_rich_line(row, 3, line, width - 6)
 
-        self._put(height - 4, 1, "─" * (width - 2), curses.A_DIM)
-        status_attr = self._color(4) if self.status.startswith("Error:") else self._color(3)
-        status = "Help is open; press Esc to return to chat" if self.help_visible else self.status
-        self._put(height - 3, 2, status, status_attr)
-        input_label = " MESSAGE › "
-        self._put(height - 2, 2, input_label, curses.A_BOLD | self._color(2))
-        self._put(height - 2, 2 + len(input_label), self.input_text, curses.A_BOLD)
-        self._put(
-            height - 1,
-            1,
-            "Enter send · /code · /run · /status · /view · /help · /quit · ↑/↓",
-            curses.A_DIM,
-        )
+        self._put(footer_top, 1, "─" * (width - 2), curses.A_DIM)
+        status_row = footer_top + 1
+        message_status = self.message_progress
+        if self.future is not None and self.pending_kind in {"message", "message_retry"}:
+            message_status = self.message_progress or "Waiting for reply…"
+        showing_progress = self.ui_preferences.show_progress and bool(message_status)
+        if showing_progress:
+            status_color = (
+                self._color(4)
+                if message_status.startswith(("Request failed", "Error"))
+                else self._color(3)
+            )
+            self._put(status_row, 2, "● " + message_status, status_color)
+        else:
+            status_attr = (
+                self._color(4)
+                if self.status.startswith("Error:")
+                else self._color(3)
+            )
+            status = (
+                "Help is open; press Esc to close"
+                if self.help_visible
+                else self.status
+            )
+            self._put(status_row, 2, status, status_attr)
+        input_row = footer_top + 2
+        input_label = " TASK > " if self.coding_only_mode else " MESSAGE > "
+        self._put(input_row, 2, input_label, curses.A_BOLD | self._color(2))
+        self._put(input_row, 2 + len(input_label), self.input_text, curses.A_BOLD)
+        if self.help_visible:
+            hint = "Esc: close guide · Up/Down: scroll"
+        elif self.coding_only_mode:
+            hint = "Enter: send task · Ctrl+P: actions · F1: hints"
+        elif self.active_session is None:
+            hint = "/new: create · /login: join · Ctrl+P: actions"
+        elif self.nav_help_visible:
+            hint = "Tab/←/→: views · Ctrl+P: actions · F1: hide hints"
+        else:
+            hint = "Enter: send · /help: commands · F1: show hints"
+        self._put(footer_top + 3, 2, hint, curses.A_DIM)
+        if showing_progress:
+            self._put(footer_top + 4, 2, self.status, curses.A_DIM)
+        if self.action_menu_visible:
+            self._draw_action_menu(1, height - 2, width)
         cursor_x = min(width - 2, 2 + len(input_label) + len(self.input_text))
-        if not self.future:
+        if not self.future and not self.action_menu_visible:
             try:
                 curses.curs_set(1)
-                self.screen.move(height - 2, cursor_x)
+                self.screen.move(input_row, cursor_x)
             except curses.error:
                 pass
         else:
             curses.curs_set(0)
         self.screen.refresh()
 
+    def _draw_tabs(self, width: int) -> None:
+        self.tab_hit_targets = []
+        column = 2
+        for tab in TABS:
+            label = f"[ {tab} ]" if tab == self.active_tab else f"  {tab}  "
+            attr = curses.A_BOLD | self._color(1 if tab == self.active_tab else 3)
+            self._put(2, column, label, attr)
+            self.tab_hit_targets.append((tab, column, column + len(label)))
+            column += len(label) + 1
+            if column >= width - 2:
+                break
+
+    def _draw_action_menu(self, top: int, body_height: int, width: int) -> None:
+        menu_width = min(50, width - 8)
+        left = max(2, (width - menu_width) // 2)
+        menu_height = min(len(self.action_menu_items) + 4, body_height)
+        menu_top = top + max(0, (body_height - menu_height) // 2)
+        visible_count = max(1, menu_height - 4)
+        first_item = max(
+            0,
+            min(
+                self.action_menu_index,
+                len(self.action_menu_items) - visible_count,
+            ),
+        )
+        self._put(menu_top, left, "┌" + "─" * (menu_width - 2) + "┐", self._color(1))
+        self._put(
+            menu_top + 1,
+            left + 2,
+            " ACTIONS ",
+            curses.A_BOLD | self._color(1),
+        )
+        visible_items = self.action_menu_items[
+            first_item : first_item + visible_count
+        ]
+        for offset, (name, description) in enumerate(visible_items):
+            index = first_item + offset
+            row = menu_top + 2 + offset
+            if row >= menu_top + menu_height - 1:
+                break
+            selected = index == self.action_menu_index
+            marker = "> " if selected else "  "
+            text = f"{marker}{name:<14} {description}"
+            self._put(
+                row,
+                left + 1,
+                text[: menu_width - 2],
+                curses.A_REVERSE if selected else 0,
+            )
+        self._put(
+            menu_top + menu_height - 2,
+            left + 2,
+            "Up/Down move · Enter select · Esc close",
+            curses.A_DIM,
+        )
+        self._put(
+            menu_top + menu_height - 1,
+            left,
+            "└" + "─" * (menu_width - 2) + "┘",
+            self._color(1),
+        )
+
     def _chat_panel_lines(self, width: int) -> list[list[tuple[str, str]]]:
         session = self.active_session
-        if session is None or not session.chat_log:
-            return [[("Start a conversation by typing below.", "dim")]]
-        return self._transcript_lines(session, width - 2)
+        staged_chat_log = self.pending_initial_chat_log
+        selected_profile = self.profile_store.profiles.get(
+            self.profile_store.selected
+        )
+        if staged_chat_log is not None:
+            if not staged_chat_log:
+                return [[("No starting chat history is staged.", "dim")]]
+            player_name = (
+                session.player_name
+                if session is not None
+                else selected_profile.player_name
+                if selected_profile is not None
+                else "Player"
+            )
+            preview = ChatProfile(
+                player_name=player_name,
+                persona="",
+                chat_log=staged_chat_log,
+            )
+            return [
+                [("STARTING CHAT LOG — staged for /new", "player")],
+                *self._transcript_lines(preview, width - 2),
+            ]
+        if session is not None and session.chat_log:
+            return self._transcript_lines(session, width - 2)
+        if session is None and selected_profile is not None:
+            if selected_profile.chat_log:
+                return [
+                    [("SELECTED PROFILE CHAT LOG", "player")],
+                    *self._transcript_lines(selected_profile, width - 2),
+                ]
+        if session is None:
+            if self.coding_only_mode:
+                return [
+                    [("Code-only mode is ready.", "player")],
+                    [("Describe a coding task below and press Enter.", "dim")],
+                ]
+            return [
+                [("No conversation selected.", "player")],
+                [("Press Ctrl+P and choose New session.", "dim")],
+                [("Or enter /new to create or /login to join.", "dim")],
+            ]
+        return [
+            [("No messages yet.", "player")],
+            [("Type below and press Enter to send.", "dim")],
+        ]
+
+    def _activity_panel_lines(self) -> list[list[tuple[str, str]]]:
+        lines: list[list[tuple[str, str]]] = [
+            [("SESSION ACTIVITY", "player")],
+            [("Progress is temporary and is not added to the chat transcript.", "dim")],
+            [("", "normal")],
+        ]
+        participant_id = self._active_participant_id()
+        updates = [
+            update
+            for update in self.progress_updates.values()
+            if self.ui_preferences.show_progress
+            or update.participant_id != participant_id
+        ]
+        if not updates:
+            lines.append([("No active or recent progress updates.", "dim")])
+            if not self.ui_preferences.show_progress:
+                lines.append(
+                    [("Your own progress updates are hidden. Use /progress on to show them.", "dim")]
+                )
+            return lines
+        for update in sorted(
+            updates,
+            key=lambda item: item.updated_at,
+            reverse=True,
+        ):
+            label = PROGRESS_LABELS.get(update.phase, "Working")
+            detail = f" · {update.detail}" if update.detail else ""
+            participant = update.participant_id[:6]
+            lines.append(
+                [
+                    (
+                        f"{update.player_name} · client {participant} · {label}{detail}",
+                        "ai",
+                    )
+                ]
+            )
+        return lines
+
+    def _review_panel_lines(self) -> list[list[tuple[str, str]]]:
+        if not self.coding_state.job_patch:
+            return [
+                [("PATCH REVIEW", "player")],
+                [("", "normal")],
+                [("No agent patch is waiting for review.", "dim")],
+                [("When an agent finishes, inspect its patch here.", "dim")],
+            ]
+        lines = [
+            [("REVIEW AGENT PATCH", "player")],
+            [
+                (
+                    "Changes are isolated until you explicitly apply them.",
+                    "dim",
+                )
+            ],
+            [("Ctrl+A apply · Ctrl+D discard · /diff workspace", "dim")],
+            [("", "normal")],
+        ]
+        lines.extend(
+            [
+                (
+                    line,
+                    "action"
+                    if line.startswith("+")
+                    else "player"
+                    if line.startswith("---") or line.startswith("+++")
+                    else "dim",
+                )
+            ]
+            for line in self.coding_state.job_patch.splitlines()[-1000:]
+        )
+        lines.extend(
+            [
+                [("", "normal")],
+                [("[A] Apply patch    [D] Discard patch    [Esc] Back", "player")],
+            ]
+        )
+        return lines
 
     def _coding_panel_lines(self, width: int) -> list[list[tuple[str, str]]]:
         lines: list[list[tuple[str, str]]] = []
@@ -1127,7 +1750,7 @@ class ChatApp:
 
     def _transcript_lines(
         self,
-        session: ChatSession,
+        session: ChatSession | ChatProfile,
         width: int,
     ) -> list[list[tuple[str, str]]]:
         lines: list[list[tuple[str, str]]] = []
@@ -1216,7 +1839,108 @@ class ChatApp:
     def _color(pair: int) -> int:
         return curses.color_pair(pair) if curses.has_colors() else 0
 
+    def _select_tab(self, tab: str) -> None:
+        if tab not in TABS:
+            return
+        self.active_tab = tab
+        self.view_mode = {
+            "Chat": "chat",
+            "Activity": "chat",
+            "Coding": "coding",
+            "Review": "coding",
+        }[tab]
+        self.scroll_offset = 0
+        self.coding_scroll_offset = 0
+        self.action_menu_visible = False
+
+    def _cycle_tab(self, direction: int) -> None:
+        index = TABS.index(self.active_tab)
+        self._select_tab(TABS[(index + direction) % len(TABS)])
+
+    def _toggle_split(self) -> None:
+        split_enabled = self.view_mode != "split"
+        self._select_tab("Chat")
+        self.view_mode = "split" if split_enabled else "chat"
+        self.status = (
+            "Chat and coding split view enabled"
+            if self.view_mode == "split"
+            else "Chat-focused view enabled"
+        )
+
+    def _activate_action_menu_item(self) -> None:
+        selected = self.action_menu_items[self.action_menu_index][0]
+        self.action_menu_visible = False
+        if selected in TABS:
+            self._select_tab(selected)
+        elif selected == "Split":
+            self._toggle_split()
+        elif selected == "New session":
+            self.create_session()
+        elif selected == "Help":
+            self.help_visible = True
+            self.scroll_offset = 0
+
+    def _handle_mouse(self) -> None:
+        if not self.mouse_enabled:
+            return
+        try:
+            _, x, y, _, button_state = curses.getmouse()
+        except curses.error:
+            return
+        if not button_state & curses.BUTTON1_CLICKED or y != 2:
+            return
+        for tab, start, end in self.tab_hit_targets:
+            if start <= x < end:
+                self._select_tab(tab)
+                return
+
     def handle_key(self, key: int | str) -> None:
+        if key == curses.KEY_F0 + 1:
+            self.nav_help_visible = not self.nav_help_visible
+            self.ui_preferences.show_navigation_help = self.nav_help_visible
+            self._save_ui_preferences()
+            return
+        if key == curses.KEY_MOUSE:
+            self._handle_mouse()
+            return
+        if key == curses.KEY_F0 + 2:
+            self._select_tab("Chat")
+            return
+        if key == curses.KEY_F0 + 3:
+            self._select_tab("Activity")
+            return
+        if key == curses.KEY_F0 + 4:
+            self._select_tab("Coding")
+            return
+        if key == curses.KEY_F0 + 5:
+            self._select_tab("Review")
+            return
+        if key == curses.KEY_F0 + 6:
+            self._toggle_split()
+            return
+        if key in ("\t", curses.KEY_RIGHT):
+            self._cycle_tab(1)
+            return
+        if key == getattr(curses, "KEY_BTAB", -1) or key == curses.KEY_LEFT:
+            self._cycle_tab(-1)
+            return
+        if key == "\x10":
+            self.action_menu_visible = not self.action_menu_visible
+            return
+        if self.action_menu_visible:
+            if key == "\x1b":
+                self.action_menu_visible = False
+            elif key == curses.KEY_UP:
+                self.action_menu_index = (
+                    self.action_menu_index - 1
+                ) % len(self.action_menu_items)
+            elif key == curses.KEY_DOWN:
+                self.action_menu_index = (
+                    self.action_menu_index + 1
+                ) % len(self.action_menu_items)
+            elif key in ("\n", "\r", curses.KEY_ENTER):
+                self._activate_action_menu_item()
+            return
         if self.help_visible:
             if key == "\x1b":
                 self.help_visible = False
@@ -1270,10 +1994,14 @@ class ChatApp:
             else:
                 self.scroll_offset = 10**9
         elif key == curses.KEY_END:
-            if self.view_mode == "coding":
+            if self.active_tab in {"Coding", "Review"}:
                 self.coding_scroll_offset = 0
             else:
                 self.scroll_offset = 0
+        elif key == "\x01" and self.active_tab == "Review":
+            self._apply_agent_patch()
+        elif key == "\x04" and self.active_tab == "Review":
+            self._discard_agent_patch()
         elif key == "\x03":
             self.closed = True
         elif isinstance(key, str) and key.isprintable():
@@ -1295,6 +2023,13 @@ class ChatApp:
             self.input_text = ""
             self.handle_command(value)
             return
+        if self.coding_only_mode:
+            if len(value) > 4000:
+                self.status = "Error: coding tasks must be at most 4000 characters"
+                return
+            self.input_text = ""
+            self._submit_code_only_task(value)
+            return
         session = self.active_session
         if session is None:
             self.status = "Error: create a session with /new first"
@@ -1304,6 +2039,121 @@ class ChatApp:
             return
         self.input_text = ""
         self._send_chat_message(value, session.server_session_id)
+
+    def _submit_code_only_task(self, task: str) -> bool:
+        if not self.coding_only_mode:
+            self.status = "Error: code-only mode is not enabled"
+            return False
+        if self.agent_process is not None or self.coding_future is not None:
+            self.code_only_queue.append(task)
+            self.status = (
+                f"Queued code-only task ({len(self.code_only_queue)} waiting); "
+                "it will run after the current agent task."
+            )
+            self._save_coding_state()
+            return True
+        if self.coding_state.job_patch:
+            self.code_only_queue.append(task)
+            self.status = (
+                "Queued code-only task. Review the current patch with /apply or "
+                "/discard before the next agent task starts."
+            )
+            self._save_coding_state()
+            return True
+        return self._start_code_only_task(task)
+
+    def _start_code_only_task(self, task: str) -> bool:
+        if not self.coding_state.command_template:
+            self.status = (
+                "Error: configure a coding CLI first with /agent configure"
+            )
+            return False
+        try:
+            skills = coding_tools.selected_skill_text(
+                self.coding_state.skills,
+                self.skills,
+            )
+        except ValueError as exc:
+            self.status = f"Error: {exc}"
+            return False
+
+        self._add_coding_turn("user", task)
+        existing_brief = self.coding_state.plan.strip()
+        prompt = (
+            "Work directly on the user's coding request. The phone model is unavailable; "
+            "do not expect further instructions or review from the AI assistant. Treat the "
+            "following as the user's task, inspect relevant files, make the "
+            "requested changes, and run focused validation.\n\n"
+            f"USER TASK:\n{task}\n\n"
+            f"EXISTING CODING BRIEF (if relevant):\n"
+            f"{existing_brief or '(No existing brief.)'}\n\n"
+            f"CODING-MODE HISTORY:\n"
+            f"{coding_tools.coding_history_text(self.coding_state.coding_history)}\n\n"
+            f"SELECTED SKILLS:\n{skills}\n\n"
+            "Preserve unrelated work and user changes. Do not read or reveal "
+            ".env files, credentials, or secrets. Do not commit changes. Summarize "
+            "changed files and test results."
+        )
+        self.coding_state.plan_request = task
+        self.coding_state.plan_workspace = str(self.workspace)
+        if not self._launch_agent_prompt(prompt):
+            return False
+        self.coding_state.plan_status = "submitted"
+        self._save_coding_state()
+        return True
+
+    def _start_next_code_only_task(self) -> None:
+        if (
+            not self.coding_only_mode
+            or not self.code_only_queue
+            or self.agent_process is not None
+            or self.coding_future is not None
+            or (
+                self.coding_state.job_patch
+                and self.coding_state.job_status != "applied"
+            )
+        ):
+            return
+        task = self.code_only_queue[0]
+        if self._start_code_only_task(task):
+            self.code_only_queue.pop(0)
+
+    def _enable_code_only_mode(self, error: Exception, task: str = "") -> bool:
+        if not self._confirm_code_only_mode(error):
+            self.status = "Phone model unavailable; code-only mode declined."
+            return False
+        self.coding_only_mode = True
+        self.status = (
+            "Code-only mode enabled. Messages go directly to the coding agent; "
+            "AI chat and planning are disabled."
+        )
+        if task and not self._submit_code_only_task(task):
+            return False
+        return True
+
+    def _confirm_code_only_mode(self, error: Exception) -> bool:
+        height, width = self.screen.getmaxyx()
+        prompt = (
+            f"Phone model failed ({error}). Continue in code-only mode? [y/N] "
+        )
+        self.screen.timeout(-1)
+        try:
+            self.screen.erase()
+            self._put(0, 2, " PHONE MODEL UNAVAILABLE ", curses.A_BOLD | self._color(4))
+            self._put(height // 2 - 1, 2, prompt[: max(1, width - 4)])
+            detail = (
+                "Messages will go directly to your coding agent; AI chat "
+                "and planning won't be available."
+            )
+            self._put(height // 2, 2, detail[: max(1, width - 4)])
+            self.screen.move(height // 2 + 1, 2)
+            self.screen.refresh()
+            answer = self.screen.get_wch()
+            return isinstance(answer, str) and answer.casefold() == "y"
+        except curses.error:
+            return False
+        finally:
+            self.screen.timeout(100)
 
     def _send_chat_message(self, message: str, session_id: int) -> None:
         session = next(
@@ -1339,8 +2189,11 @@ class ChatApp:
         self.pending_message_can_start_coding = (
             self.coding_future is None and not self.coding_state.job_patch
         )
+        self.message_progress = (
+            "Sending message…" if self.ui_preferences.show_progress else ""
+        )
         self.retry_delay_seconds = 5
-        self.status = "Waiting for Gemini/server reply…"
+        self.status = "Waiting for phone model/server reply…"
         self.pending_kind = "message"
         self.future = self.executor.submit(
             send_message,
@@ -1349,11 +2202,12 @@ class ChatApp:
             message,
             session.access_token,
             coding_context,
+            self.ui_preferences.show_progress,
         )
 
     def _confirm_coding_mode(self) -> bool:
         height, width = self.screen.getmaxyx()
-        prompt = "Gemini thinks this is a coding request. Start coding mode? [y/N] "
+        prompt = "The phone model thinks this is a coding request. Start coding mode? [y/N] "
         self.screen.timeout(-1)
         try:
             self.screen.erase()
@@ -1385,6 +2239,26 @@ class ChatApp:
         finally:
             self.screen.timeout(100)
 
+    def _confirm_agent_install(self, label: str, plan: list[list[str]]) -> bool:
+        height, width = self.screen.getmaxyx()
+        prompt = "Run these commands on this computer? [y/N] "
+        self.screen.timeout(-1)
+        try:
+            self.screen.erase()
+            self._put(0, 2, f" INSTALL {label.upper()} ", curses.A_BOLD | self._color(3))
+            for row, step in enumerate(plan[: max(0, height - 6)], start=2):
+                self._put(row, 2, f"$ {shlex.join(step)}"[: max(1, width - 4)])
+            prompt_row = min(height - 2, 3 + len(plan))
+            self._put(prompt_row, 2, prompt[: max(1, width - 4)])
+            self.screen.move(prompt_row, min(width - 2, 2 + len(prompt)))
+            self.screen.refresh()
+            answer = self.screen.get_wch()
+            return isinstance(answer, str) and answer.casefold() == "y"
+        except curses.error:
+            return False
+        finally:
+            self.screen.timeout(100)
+
     def handle_command(self, command: str) -> None:
         parts = command.split()
         action = parts[0].lower()
@@ -1395,8 +2269,9 @@ class ChatApp:
         if action == "/new":
             self.create_session()
         elif action == "/connect":
-            if self._connect_to_server():
-                self.status = f"Connected to {self.base_url}"
+            self._connect_to_server()
+        elif action == "/server":
+            self._handle_server_command(argument)
         elif action == "/list":
             self.status = "Saved sessions: " + (
                 ", ".join(
@@ -1440,21 +2315,40 @@ class ChatApp:
                 session_id,
                 password,
             )
+        elif action == "/style":
+            self._handle_style_command(command.partition(" ")[2].strip())
+        elif action == "/chatskill":
+            self._handle_chat_skill_command(command.partition(" ")[2].strip())
         elif action == "/profile":
             self._handle_profile_command(command.partition(" ")[2].strip())
         elif action == "/log":
             self._handle_log_command(command.partition(" ")[2].strip())
         elif action == "/retry" and len(parts) == 2 and parts[1].casefold() == "cancel":
             self._cancel_message_retry()
+        elif action == "/progress" and len(parts) == 2 and parts[1].casefold() in {"on", "off"}:
+            self.ui_preferences.show_progress = parts[1].casefold() == "on"
+            if not self.ui_preferences.show_progress:
+                self.message_progress = ""
+            self._save_ui_preferences()
+            self.status = (
+                "Your message progress is visible"
+                if self.ui_preferences.show_progress
+                else "Your message progress is hidden; the session host can still see it"
+            )
+        elif action == "/progress" and len(parts) == 1:
+            self.status = (
+                "Your message progress is "
+                f"{'visible' if self.ui_preferences.show_progress else 'hidden'}"
+            )
         elif action == "/code" and argument:
             self._start_plan(argument)
         elif action == "/refine" and argument:
             self._refine_plan(argument)
         elif action == "/plan":
-            self.view_mode = "coding"
+            self._select_tab("Coding")
             self.coding_scroll_offset = 0
             self.status = (
-                "Review the Gemini brief; use /refine <feedback> or /run."
+                "Review the phone model's brief; use /refine <feedback> or /run."
                 if self.coding_state.plan
                 else "No plan yet. Use /code <request>."
             )
@@ -1462,8 +2356,16 @@ class ChatApp:
             self._run_agent()
         elif action == "/coding-mode":
             self._set_coding_mode(argument)
+        elif action == "/coding-only" and argument.casefold() == "off":
+            self.coding_only_mode = False
+            self.status = "Code-only mode disabled"
+        elif action == "/coding-only":
+            self.status = (
+                "Code-only mode is "
+                f"{'enabled' if self.coding_only_mode else 'disabled'}"
+            )
         elif action == "/status":
-            self.view_mode = "coding"
+            self._select_tab("Coding")
             self.status = (
                 f"Plan: {self.coding_state.plan_status}; "
                 f"agent: {self.coding_state.job_status}"
@@ -1474,7 +2376,7 @@ class ChatApp:
         elif action == "/diff":
             if self.coding_state.job_patch:
                 self.coding_state.job_output = self.coding_state.job_patch
-                self.view_mode = "coding"
+                self._select_tab("Review")
                 self.coding_scroll_offset = 0
                 self.status = "Agent patch loaded; inspect it before /apply or /discard."
             elif self._start_coding_request("diff", coding_tools.git_diff, self.workspace):
@@ -1489,18 +2391,31 @@ class ChatApp:
             self._suggest_task()
         elif action == "/workspace":
             self._select_workspace(argument)
-        elif action == "/view" and len(parts) == 2 and parts[1] in {
+        elif action == "/view" and len(parts) == 2 and parts[1].casefold() in {
             "chat",
+            "activity",
             "coding",
+            "review",
             "split",
         }:
-            self.view_mode = parts[1]
-            self.status = f"Changed view to {self.view_mode}"
+            view = parts[1].casefold()
+            if view == "split":
+                self._select_tab("Chat")
+                self.view_mode = "split"
+            else:
+                self._select_tab(view.title())
+            self.status = f"Changed view to {view}"
         elif action == "/agent":
             self._handle_agent_command(parts[1:])
         elif action == "/skill":
             self._handle_skill_command(command.partition(" ")[2].strip())
         elif action == "/command" and argument:
+            if self.coding_only_mode:
+                self.status = (
+                    "Error: command suggestions require the phone model; use the coding "
+                    "agent directly with a normal message instead."
+                )
+                return
             self.coding_state.command_request = argument
             self.coding_state.proposed_command = ""
             self.coding_state.command_output = ""
@@ -1508,7 +2423,7 @@ class ChatApp:
             if self._start_coding_request(
                 "command", coding_tools.suggest_command, self.workspace, argument
             ):
-                self.status = "Asking Gemini for a command proposal…"
+                self.status = "Asking the phone model for a command proposal…"
         elif action == "/approve":
             self._approve_command()
         elif action == "/reject":
@@ -1523,15 +2438,18 @@ class ChatApp:
 
     def _start_coding_request(self, kind: str, function: Any, *args: Any) -> bool:
         if self.coding_future is not None:
-            self.status = "Error: another Gemini coding request is still running"
+            self.status = "Error: another phone-model coding request is still running"
             return False
         self.coding_future_kind = kind
         self.coding_future = self.executor.submit(function, *args)
         return True
 
     def _start_plan(self, request: str) -> None:
+        if self.coding_only_mode:
+            self._submit_code_only_task(request)
+            return
         if self.coding_future is not None:
-            self.status = "Error: another Gemini coding request is still running"
+            self.status = "Error: another phone-model coding request is still running"
             return
         if len(request) > 4000:
             self.status = "Error: coding request must be at most 4000 characters"
@@ -1548,14 +2466,13 @@ class ChatApp:
             self.status = f"Error: {exc}"
             return
         self.coding_state.plan_request = request
+        self.pending_model_fallback_task = request
         self.coding_state.plan = ""
         self.coding_state.plan_workspace = str(self.workspace)
         self.coding_state.plan_status = "planning"
         self._add_coding_turn("user", request)
         chat_context = getattr(self, "coding_request_chat_context", "")
         self.coding_request_chat_context = ""
-        self.view_mode = "coding"
-        self.coding_scroll_offset = 0
         self.coding_future_kind = "plan"
         self.coding_future = self.executor.submit(
             coding_tools.make_plan,
@@ -1565,10 +2482,15 @@ class ChatApp:
             skills,
             chat_context=chat_context,
         )
-        self.status = "Gemini is preparing a coding brief…"
+        self.status = "Phone model is preparing a coding brief…"
         self._save_coding_state()
 
     def _refine_plan(self, feedback: str) -> None:
+        if self.coding_only_mode:
+            self._submit_code_only_task(
+                f"Continue the existing coding task with this user feedback:\n{feedback}"
+            )
+            return
         if not self.coding_state.plan:
             self.status = "Error: create a plan first with /code <request>"
             return
@@ -1576,9 +2498,13 @@ class ChatApp:
             self.status = "Error: this brief belongs to another workspace; create a new plan"
             return
         if self.coding_future is not None:
-            self.status = "Error: another Gemini coding request is still running"
+            self.status = "Error: another phone-model coding request is still running"
             return
         self._add_coding_turn("user", feedback)
+        self.pending_model_fallback_task = (
+            f"Continue this existing task:\n{self.coding_state.plan}\n\n"
+            f"Apply the user's latest feedback:\n{feedback}"
+        )
         self.coding_state.plan_status = "refining"
         self.coding_future_kind = "refine"
         self.coding_future = self.executor.submit(
@@ -1588,7 +2514,7 @@ class ChatApp:
             feedback,
             coding_history=self.coding_state.coding_history[:-1],
         )
-        self.status = "Gemini is updating the brief…"
+        self.status = "Phone model is updating the brief…"
         self._save_coding_state()
 
     def _set_coding_mode(self, mode: str) -> None:
@@ -1609,10 +2535,18 @@ class ChatApp:
 
     def _suggest_task(self) -> None:
         if self.coding_future is not None:
-            self.status = "Error: another Gemini coding request is still running"
+            self.status = "Error: another phone-model coding request is still running"
             return
         if self.coding_state.job_patch:
             self.status = "Review the pending agent patch with /apply or /discard first"
+            return
+        try:
+            skill_text = coding_tools.selected_skill_text(
+                self.coding_state.skills,
+                self.skills,
+            )
+        except ValueError as exc:
+            self.status = f"Error: {exc}"
             return
         file_list_entries: list[str] = []
         ignored_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__"}
@@ -1645,11 +2579,10 @@ class ChatApp:
             self.workspace,
             request,
             self.coding_state.coding_history,
-            coding_tools.selected_skill_text(self.coding_state.skills, self.skills),
+            skill_text,
             workspace_context=f"Workspace file list:\n{file_list}",
         )
-        self.view_mode = "coding"
-        self.status = "Gemini is reviewing the workspace for suggestions…"
+        self.status = "Phone model is reviewing the workspace for suggestions…"
         self._save_coding_state()
 
     def _handle_agent_command(self, args: list[str]) -> None:
@@ -1665,7 +2598,7 @@ class ChatApp:
                 if self.coding_state.provider == "custom"
                 else ""
             )
-            self.view_mode = "coding"
+            self._select_tab("Coding")
             self.status = f"Selected agent: {self.coding_state.provider}"
             self._save_coding_state()
         elif args[0] == "use" and len(args) == 2:
@@ -1738,17 +2671,33 @@ class ChatApp:
             )
             self.status = f"Loading {provider['label']} native help…"
         elif args[0] == "install" and len(args) == 2:
-            provider = coding_tools.PROVIDER_SPECS.get(args[1].lower())
+            name = args[1].lower()
+            provider = coding_tools.PROVIDER_SPECS.get(name)
             if provider is None or not provider["website"]:
                 self.status = "Error: see /agent list or configure a custom CLI"
-            else:
+                return
+            if self.agent_process is not None or self.coding_future is not None:
+                self.status = "Error: wait for the active coding task before installing"
+                return
+            try:
+                plan = coding_tools.install_plan(name)
+            except ValueError as exc:
                 self.coding_state.job_output = (
-                    f"Install {provider['label']} manually from:\n"
-                    f"{provider['website']}\n"
-                    "The app never downloads or runs installers."
+                    f"{exc}\nOfficial installation page:\n{provider['website']}"
                 )
-                self.view_mode = "coding"
-                self.status = f"Official installation page for {provider['label']} shown"
+                self._select_tab("Coding")
+                self.status = f"Error: {exc}"
+                return
+            if not self._confirm_agent_install(str(provider["label"]), plan):
+                self.status = "Installation cancelled"
+                return
+            self.coding_state.job_output = (
+                f"Installing {provider['label']}…\n"
+                + "\n".join(f"$ {shlex.join(step)}" for step in plan)
+            )
+            self._select_tab("Coding")
+            if self._start_coding_request("agent_install", coding_tools.run_install, plan):
+                self.status = f"Installing {provider['label']}… this can take a few minutes"
         else:
             self.status = (
                 "Use /agent list, use NAME, configure, help, or install NAME"
@@ -1790,6 +2739,140 @@ class ChatApp:
         self.coding_state.workspace = str(self.workspace)
         self.status = f"Project root set to {self.workspace}"
         self._save_coding_state()
+
+    def _save_chat_skill_library(self) -> bool:
+        try:
+            save_chat_skills(self.chat_skills_path, self.chat_skill_library)
+        except OSError as exc:
+            self.status = f"Error saving chat skills: {exc}"
+            return False
+        return True
+
+    def _handle_chat_skill_command(self, argument: str) -> None:
+        parts = argument.split(None, 2)
+        action = parts[0].casefold() if parts else "list"
+        session = self.active_session
+        available = {**CHAT_SKILLS, **self.chat_skill_library}
+        active = session.chat_skills if session is not None else {}
+        if action == "list" or (action == "show" and len(parts) < 2):
+            names = [
+                f"{name}{'*' if name in active else ''}"
+                f"{'' if name in CHAT_SKILLS else ' [yours]'}"
+                for name in available
+            ]
+            self.status = (
+                "Chat skills: " + ", ".join(names) + " (* active). /chatskill use|off NAME, "
+                "clear, show NAME, create NAME TEXT, delete NAME"
+            )
+            return
+        if action == "show":
+            name = parts[1].casefold()
+            if name not in available:
+                self.status = f"Error: unknown chat skill; choose from {', '.join(available)}"
+                return
+            self.coding_state.job_output = f"CHAT SKILL: {name}\n\n{available[name]}"
+            self._select_tab("Coding")
+            self.status = f"Showing chat skill: {name}"
+            return
+        if action in {"create", "delete"} and len(parts) >= 2:
+            name = parts[1].casefold()
+            if not SKILL_NAME.fullmatch(name):
+                self.status = "Error: skill name must be 1-30 letters, numbers, _ or -"
+                return
+            if name in CHAT_SKILLS:
+                self.status = "Error: built-in chat skills cannot be changed"
+                return
+            if action == "delete":
+                if name not in self.chat_skill_library:
+                    self.status = f"Error: you have no chat skill named {name}"
+                    return
+                del self.chat_skill_library[name]
+                if self._save_chat_skill_library():
+                    self.status = (
+                        f"Deleted chat skill {name}; sessions already using it keep it"
+                    )
+                return
+            text = " ".join(parts[2].split()) if len(parts) == 3 else ""
+            if not text:
+                self.status = "Use /chatskill create NAME INSTRUCTIONS"
+                return
+            if len(text) > MAX_SKILL_TEXT_LENGTH:
+                self.status = (
+                    f"Error: skill instructions must be at most {MAX_SKILL_TEXT_LENGTH} characters"
+                )
+                return
+            self.chat_skill_library[name] = text
+            if self._save_chat_skill_library():
+                self.status = f"Saved chat skill {name} on this computer. Pick it at /new."
+            return
+        if action == "clear" and len(parts) == 1:
+            updated: dict[str, str] = {}
+        elif action in {"use", "off"} and len(parts) == 2:
+            name = parts[1].casefold()
+            updated = dict(active)
+            if action == "use":
+                if name not in available:
+                    self.status = f"Error: unknown chat skill; choose from {', '.join(available)}"
+                    return
+                updated[name] = available[name]
+            else:
+                updated.pop(name, None)
+            if len(updated) > MAX_ACTIVE_CHAT_SKILLS:
+                self.status = (
+                    f"Error: at most {MAX_ACTIVE_CHAT_SKILLS} chat skills can be active; "
+                    "turn one off first"
+                )
+                return
+        else:
+            self.status = (
+                "Use /chatskill list, show NAME, use NAME, off NAME, clear, "
+                "create NAME TEXT, or delete NAME"
+            )
+            return
+        if session is None or not session.access_token:
+            self.status = "Error: open a session with /new or /login first"
+            return
+        if self.future is not None:
+            self.status = "Error: wait for the current request to finish"
+            return
+        self.status = "Sending chat skills to the server…"
+        self.pending_kind = "chat_skill"
+        self.future = self.executor.submit(
+            set_session_skills,
+            session.server_url or self.base_url,
+            session.server_session_id,
+            updated,
+            session.access_token,
+        )
+
+    def _handle_style_command(self, argument: str) -> None:
+        if not argument:
+            self.status = (
+                f"Styles: {', '.join(STYLE_PRESETS)}, or /style YOUR OWN WORDS; "
+                "/style off clears it"
+            )
+            return
+        session = self.active_session
+        if session is None or not session.access_token:
+            self.status = "Error: open a session with /new or /login first"
+            return
+        if self.future is not None:
+            self.status = "Error: wait for the current request to finish"
+            return
+        try:
+            style = resolve_style(argument)
+        except ValueError as exc:
+            self.status = f"Error: {exc}"
+            return
+        self.status = "Updating reply style…"
+        self.pending_kind = "style"
+        self.future = self.executor.submit(
+            set_session_style,
+            session.server_url or self.base_url,
+            session.server_session_id,
+            style,
+            session.access_token,
+        )
 
     def _handle_profile_command(self, argument: str) -> None:
         try:
@@ -1925,14 +3008,14 @@ class ChatApp:
                 f"{' [custom]' if name in self.coding_state.custom_skills else ''}"
                 for name in sorted(self.skills)
             ) or "No skills found."
-            self.view_mode = "coding"
+            self._select_tab("Coding")
             self.status = "Built-in and discovered skills shown in coding view"
         elif args[0] == "show" and len(args) == 2:
             if args[1] not in self.skills:
                 self.status = f"Error: unknown skill '{args[1]}'; use /skill list"
                 return
             self.coding_state.job_output = f"SKILL: {args[1]}\n\n{self.skills[args[1]]}"
-            self.view_mode = "coding"
+            self._select_tab("Coding")
             self.status = f"Showing skill: {args[1]}"
         elif args[0] == "use" and len(args) == 2:
             if args[1] not in self.skills:
@@ -1940,7 +3023,7 @@ class ChatApp:
                 return
             if args[1] not in self.coding_state.skills:
                 self.coding_state.skills.append(args[1])
-            self.status = f"Selected skill for Gemini and agent: {args[1]}"
+            self.status = f"Selected skill for the phone model and agent: {args[1]}"
         elif args[0] == "clear":
             self.coding_state.skills.clear()
             self.status = "Cleared selected skills"
@@ -1988,7 +3071,7 @@ class ChatApp:
 
     def _run_agent(self) -> None:
         if not self.coding_state.plan or self.coding_state.plan_status != "reviewing":
-            self.status = "Error: review a Gemini brief before using /run"
+            self.status = "Error: review the phone model's brief before using /run"
             return
         if self.agent_process is not None:
             self.status = "Error: a coding agent is already running"
@@ -1998,12 +3081,6 @@ class ChatApp:
                 "Error: this brief was made for another workspace. "
                 "Create a fresh brief with /code <request>."
             )
-            return
-        if not self.coding_state.command_template:
-            self.status = "Configure an agent CLI first with /agent configure."
-            return
-        if self.coding_future is not None:
-            self.status = "Error: wait for the active coding request to finish"
             return
         try:
             skills = coding_tools.selected_skill_text(
@@ -2020,27 +3097,37 @@ class ChatApp:
                 "or secrets. Do not commit changes. Run focused validation and "
                 "summarize changed files and test results."
             )
-            self.coding_state.job_status = "preparing"
-            self.coding_state.job_patch = ""
-            self.coding_state.job_output = ""
-            self.coding_state.job_command = self.coding_state.command_template
-            self.coding_state.plan_status = "submitted"
-            self.view_mode = "split"
-            self.coding_future_kind = "agent_start"
-            self.coding_future = self.executor.submit(
-                coding_tools.AgentProcess,
-                self.coding_state.command_template,
-                prompt,
-                self.workspace,
-            )
         except (OSError, ValueError) as exc:
             self.status = (
                 f"Error: could not start coding agent: {exc}. "
                 "Check its installation and /agent configure."
             )
             return
-        self.status = "Preparing isolated agent workspace…"
+        if self._launch_agent_prompt(prompt):
+            self.coding_state.plan_status = "submitted"
+            self._save_coding_state()
+
+    def _launch_agent_prompt(self, prompt: str) -> bool:
+        if self.agent_process is not None or self.coding_future is not None:
+            self.status = "Error: wait for the active coding task to finish"
+            return False
+        if not self.coding_state.command_template:
+            self.status = "Configure an agent CLI first with /agent configure."
+            return False
+        self.coding_state.job_status = "preparing"
+        self.coding_state.job_patch = ""
+        self.coding_state.job_output = ""
+        self.coding_state.job_command = self.coding_state.command_template
+        self.coding_future_kind = "agent_start"
+        self.coding_future = self.executor.submit(
+            coding_tools.AgentProcess,
+            self.coding_state.command_template,
+            prompt,
+            self.workspace,
+        )
+        self.status = "Preparing isolated agent workspace… Open Coding (F4) or Split (F6)."
         self._save_coding_state()
+        return True
 
     def _cancel_agent(self) -> None:
         if self.coding_future is not None:
@@ -2055,7 +3142,7 @@ class ChatApp:
             if self.coding_future_kind == "agent_start":
                 self.status = "Agent workspace preparation is underway; wait for it to finish."
                 return
-            self.status = "Gemini request is already in progress and cannot be interrupted."
+            self.status = "Phone model request is already in progress and cannot be interrupted."
             return
         if self.agent_process is None:
             self.status = "No coding agent is running"
@@ -2093,7 +3180,7 @@ class ChatApp:
         self.command_confirmation = False
         self.coding_state.proposed_command = ""
         self.coding_state.command_request = ""
-        self.status = "Rejected Gemini's command proposal"
+        self.status = "Rejected the AI's command proposal"
         self._save_coding_state()
 
     def _apply_agent_patch(self) -> None:
@@ -2124,6 +3211,7 @@ class ChatApp:
             self.coding_state.plan_status = "reviewing"
             self.status = "Discarded the isolated agent patch; workspace was not changed"
         self._save_coding_state()
+        self._start_next_code_only_task()
 
     def _finish_coding_request(self) -> None:
         if self.coding_future is None or not self.coding_future.done():
@@ -2135,14 +3223,15 @@ class ChatApp:
         try:
             result = future.result()
             if kind in {"plan", "refine", "suggest"}:
+                if kind in {"plan", "refine"}:
+                    self.pending_model_fallback_task = ""
                 self.coding_state.plan = str(result)[: coding_tools.MAX_PLAN_LENGTH]
                 self.coding_state.plan_status = "reviewing"
                 if kind in {"plan", "refine"}:
                     self._add_coding_turn("assistant", self.coding_state.plan)
-                self.view_mode = "coding"
                 self.status = (
-                    "Gemini brief ready. Discuss with /refine <feedback>; "
-                    "use /run when you're happy with it."
+                    "Phone-model brief ready. Open Coding (F4), refine with /refine, "
+                    "or use /run when you're happy with it."
                 )
                 if kind == "plan" and self.coding_state.coding_mode == "auto":
                     self._run_agent()
@@ -2160,9 +3249,9 @@ class ChatApp:
                 self.coding_state.command_cwd = str(self.workspace)
                 self.command_confirmation = True
                 self.coding_state.command_output = ""
-                self.view_mode = "coding"
+                self._select_tab("Coding")
                 self.status = (
-                    "Gemini proposed a command. Review it in coding view, "
+                    "The phone model proposed a command. Review it in coding view, "
                     "then use /approve or /reject."
                 )
             elif kind == "run_command":
@@ -2181,8 +3270,19 @@ class ChatApp:
                 self.coding_state.job_output = (
                     f"CLI help (exit code {returncode}):\n{output}"
                 )
-                self.view_mode = "coding"
+                self._select_tab("Coding")
                 self.status = f"{self.coding_state.provider} help loaded"
+            elif kind == "agent_install":
+                returncode, output = result
+                self.coding_state.job_output = (
+                    f"Install finished (exit code {returncode}):\n{output}"
+                )
+                self._select_tab("Coding")
+                self.status = (
+                    "Install finished. Run /agent list to confirm it was detected."
+                    if returncode == 0
+                    else "Install failed; see the output in the Coding tab"
+                )
             elif kind == "agent_start":
                 self.agent_process = result
                 self.agent_output_lines = []
@@ -2195,15 +3295,30 @@ class ChatApp:
             elif kind == "apply_patch":
                 self.coding_state.plan_status = "applied"
                 self.coding_state.job_status = "applied"
+                self._select_tab("Review")
                 self.status = "Agent patch safely applied. Review your workspace with /diff."
+                self._save_coding_state()
+                self._start_next_code_only_task()
             elif kind == "diff":
                 self.coding_state.job_output = str(result)
-                self.view_mode = "coding"
+                self._select_tab("Coding")
                 self.coding_scroll_offset = 0
                 self.status = "Workspace diff loaded"
             self.coding_scroll_offset = 0
             self._save_coding_state()
-        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError, TimeoutError) as exc:
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            subprocess.SubprocessError,
+            TimeoutError,
+        ) as exc:
+            if kind in {"plan", "refine"}:
+                fallback_task = self.pending_model_fallback_task
+                self.pending_model_fallback_task = ""
+                self.coding_state.plan_status = "failed"
+                if self._enable_code_only_mode(exc, fallback_task):
+                    return
             if kind in {"plan", "refine", "suggest"}:
                 self.coding_state.plan_status = "failed"
             if kind == "agent_start":
@@ -2250,6 +3365,14 @@ class ChatApp:
             )
         self.agent_process = None
         self._save_coding_state()
+        if self.code_only_queue:
+            if self.coding_state.job_patch:
+                self.status = (
+                    "Agent finished. Review its patch with /apply or /discard; "
+                    f"{len(self.code_only_queue)} code-only task(s) are queued."
+                )
+            else:
+                self._start_next_code_only_task()
 
     def create_session(self, session_id: int | None = None) -> None:
         initial_chat_log = self.pending_initial_chat_log or ""
@@ -2279,6 +3402,26 @@ class ChatApp:
                 self.status = "Session creation cancelled"
                 return
 
+        style_text = self._prompt(
+            f"Reply style: {', '.join(STYLE_PRESETS)}, or your own words (blank for none)"
+        )
+        try:
+            style = resolve_style(style_text)
+        except ValueError as exc:
+            self.status = f"Error: {exc}"
+            return
+
+        available_skills = {**CHAT_SKILLS, **self.chat_skill_library}
+        skills_text = self._prompt(
+            f"Chat skills (up to {MAX_ACTIVE_CHAT_SKILLS}, comma separated): "
+            f"{', '.join(available_skills)} (blank for none)"
+        )
+        try:
+            skills = parse_chat_skills(skills_text, available_skills)
+        except ValueError as exc:
+            self.status = f"Error: {exc}"
+            return
+
         if session_id is None:
             requested_id = self._prompt("Session ID (blank for a server-generated ID)")
             if requested_id:
@@ -2293,6 +3436,8 @@ class ChatApp:
             initial_chat_log,
             session_id,
             password,
+            style,
+            skills,
         )
 
     def _start_session(
@@ -2302,6 +3447,8 @@ class ChatApp:
         chat_log: str = "",
         session_id: int | None = None,
         password: str = "",
+        style: str = "",
+        skills: dict[str, str] | None = None,
     ) -> None:
         if len(chat_log) > MAX_INITIAL_CHAT_LOG_LENGTH:
             self.status = (
@@ -2320,6 +3467,8 @@ class ChatApp:
             chat_log,
             session_id,
             password,
+            style,
+            skills,
         )
         self.pending_session_data = (player_name, persona)
 
@@ -2409,6 +3558,7 @@ class ChatApp:
                     server_session_id=response_session_id(response),
                     access_token=response_text(response, "access_token"),
                     server_url=self.base_url,
+                    chat_skills=response_skills(response),
                 )
                 self.sessions.append(session)
                 self.active_index = len(self.sessions) - 1
@@ -2430,6 +3580,7 @@ class ChatApp:
                     server_session_id=session_id,
                     access_token=response_text(response, "access_token"),
                     server_url=self.base_url,
+                    chat_skills=response_skills(response),
                 )
                 existing_index = next(
                     (
@@ -2448,6 +3599,22 @@ class ChatApp:
                     self.active_index = existing_index
                 self.status = f"Logged in to server session {session_id} and saved"
                 self._start_session_events()
+            elif kind == "chat_skill":
+                session = self.active_session
+                if session is not None:
+                    session.chat_skills = response_skills(response)
+                    self.status = (
+                        "Chat skills active: " + ", ".join(session.chat_skills)
+                        if session.chat_skills
+                        else "No chat skills active"
+                    )
+            elif kind == "style":
+                style = response.get("AI_style")
+                self.status = (
+                    f"Reply style set: {style}"
+                    if isinstance(style, str) and style
+                    else "Reply style cleared"
+                )
             elif kind in {"message", "message_retry"}:
                 session = self.active_session
                 if session is None:
@@ -2474,7 +3641,26 @@ class ChatApp:
                 self.coding_request_chat_context = code_request_context
                 self._start_plan(code_request_message)
         except ServerError as exc:
-            if kind == "login" and exc.status_code == 404:
+            if (
+                kind in {"new", "message", "message_retry"}
+                and (
+                    exc.status_code == 429
+                    or (
+                        exc.status_code is not None
+                        and 500 <= exc.status_code < 600
+                    )
+                )
+            ):
+                fallback_task = ""
+                if kind in {"message", "message_retry"}:
+                    fallback_task = self.pending_message
+                if self._enable_code_only_mode(exc, fallback_task):
+                    if fallback_task:
+                        self._clear_pending_message()
+                    return
+                if kind in {"message", "message_retry"}:
+                    self._offer_message_retry(exc)
+            elif kind == "login" and exc.status_code == 404:
                 session_id = (
                     int(self.pending_session_data[0])
                     if self.pending_session_data is not None
@@ -2536,10 +3722,12 @@ class ChatApp:
     def _offer_message_retry(self, error: Exception) -> None:
         if not self.pending_message:
             self.status = f"Message send failed after retry was cancelled: {error}"
+            self.message_progress = f"Request failed · {error}"
             return
         if not self._confirm_message_retry(error):
             self._clear_pending_message()
             self.status = "Message was not sent; retry declined"
+            self.message_progress = "Request failed · retry declined"
             return
         delay = self.retry_delay_seconds
         self.retry_due = time.monotonic() + delay
@@ -2547,6 +3735,7 @@ class ChatApp:
         self.status = (
             f"Retry scheduled in {delay} seconds. Use /retry cancel to stop it."
         )
+        self.message_progress = f"Retrying in {delay} seconds…"
 
     def _start_due_message_retry(self) -> None:
         if self.retry_due is None or time.monotonic() < self.retry_due:
@@ -2571,6 +3760,7 @@ class ChatApp:
             return
         self.retry_due = None
         self.status = "Retrying message…"
+        self.message_progress = "Retrying message…"
         self.pending_kind = "message_retry"
         self.future = self.executor.submit(
             send_message,
@@ -2579,6 +3769,7 @@ class ChatApp:
             message,
             session.access_token,
             self.pending_message_coding_context,
+            self.ui_preferences.show_progress,
         )
 
     def _cancel_message_retry(self) -> None:
@@ -2594,6 +3785,7 @@ class ChatApp:
         self.pending_message_chat_context = ""
         self.pending_message_coding_context = ""
         self.pending_message_can_start_coding = False
+        self.message_progress = ""
         self.retry_due = None
         self.retry_delay_seconds = 5
 
@@ -2627,7 +3819,7 @@ def main() -> int:
         "--workspace",
         type=Path,
         default=None,
-        help="override the saved project directory for Gemini and coding agents",
+        help="override the saved project directory for the phone model and coding agents",
     )
     args = parser.parse_args()
     workspace = args.workspace.expanduser().resolve() if args.workspace else None
@@ -2635,10 +3827,25 @@ def main() -> int:
         print(f"Workspace is not a directory: {workspace}", file=sys.stderr)
         return 2
     try:
+        server_url = normalize_server_url(args.url)
+    except ValueError as exc:
+        print(f"Invalid server address: {exc}", file=sys.stderr)
+        return 2
+    if server_url:
+        transport.configure_trust_store(args.data_file.with_name("known_servers.json"))
+        try:
+            trusted = transport.confirm_server_on_terminal(server_url)
+        except transport.TransportError as exc:
+            print(f"Could not verify {server_url}: {exc}", file=sys.stderr)
+            return 1
+        if not trusted:
+            print("The server was not trusted; exiting.", file=sys.stderr)
+            return 1
+    try:
         curses.wrapper(
             lambda screen: ChatApp(
                 screen,
-                args.url,
+                server_url,
                 args.data_file,
                 workspace,
             ).run()

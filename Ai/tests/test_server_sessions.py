@@ -1,14 +1,13 @@
+import asyncio
+import hashlib
 import os
 import socket
 import threading
 import unittest
 from itertools import count
-from types import SimpleNamespace
-from typing import cast
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
-from google.genai import Client
 
 from Ai import server
 from Ai.chat_app import discover_servers
@@ -17,6 +16,9 @@ from Ai.chat_app import discover_servers
 class FakeWebSocket:
     def __init__(self) -> None:
         self.events: list[dict[str, str]] = []
+
+    async def accept(self) -> None:
+        pass
 
     async def send_json(self, event: dict[str, str]) -> None:
         self.events.append(event)
@@ -27,9 +29,11 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
         server.chat_sessions.clear()
         server.session_passwords.clear()
         server.session_tokens.clear()
+        server.session_hosts.clear()
         server.session_locks.clear()
         server.pending_session_ids.clear()
         server.event_manager.connections.clear()
+        server.event_manager.participant_ids.clear()
         server.session_ids = count(1)
 
     async def _create_session(
@@ -45,7 +49,6 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
             password=password,
         )
         with (
-            patch.object(server, "get_client", return_value=object()),
             patch.object(
                 server,
                 "generate_reply",
@@ -91,13 +94,16 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
         grant = await self._create_session()
         self.assertEqual(grant.session_ID, 1)
         self.assertIsNone(server.session_passwords[1])
+        self.assertEqual(
+            server.session_hosts[1],
+            hashlib.sha256(grant.access_token.encode("ascii")).digest(),
+        )
 
         login_grant = server.login(server.LoginRequest(session_ID=1))
         websocket = FakeWebSocket()
         server.event_manager.connections[1] = {websocket}  # type: ignore[assignment]
 
         with (
-            patch.object(server, "get_client", return_value=object()),
             patch.object(
                 server,
                 "generate_reply",
@@ -120,28 +126,64 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("I can help.", response.Chat_log)
         self.assertTrue(response.is_coding_request)
         generate_reply.assert_called_once()
-        self.assertEqual(generate_reply.call_args.args[3], "Use the Roblox skill.")
-        self.assertEqual(generate_reply.call_args.args[4], "Please help")
+        self.assertEqual(generate_reply.call_args.args[2], "Use the Roblox skill.")
+        self.assertEqual(generate_reply.call_args.args[3], "Please help")
         self.assertEqual(websocket.events[-1]["type"], "message")
         self.assertEqual(websocket.events[-1]["chat_log"], response.Chat_log)
 
-    async def test_gemini_generates_reply_and_classification_in_one_structured_call(self) -> None:
+    async def test_progress_is_visible_to_creator_and_opted_in_sender_only(self) -> None:
+        creator = await self._create_session()
+        sender = server.login(server.LoginRequest(session_ID=creator.session_ID))
+        creator_socket = FakeWebSocket()
+        sender_socket = FakeWebSocket()
+        await server.event_manager.connect(
+            creator.session_ID,
+            server.access_token_id(f"Bearer {creator.access_token}") or b"",
+            creator_socket,  # type: ignore[arg-type]
+        )
+        await server.event_manager.connect(
+            creator.session_ID,
+            server.access_token_id(f"Bearer {sender.access_token}") or b"",
+            sender_socket,  # type: ignore[arg-type]
+        )
+
+        with (
+            patch.object(
+                server,
+                "generate_reply",
+                return_value=server.AssistantResponse(
+                    reply="Here is the answer.",
+                    is_coding_request=False,
+                ),
+            ),
+        ):
+            await server.chat(
+                server.Chatreg(
+                    ses_id=creator.session_ID,
+                    msg="Help me",
+                    show_progress=False,
+                ),
+                authorization=f"Bearer {sender.access_token}",
+            )
+            await asyncio.sleep(0)
+
+        creator_progress = [
+            event for event in creator_socket.events if event["type"] == "progress"
+        ]
+        sender_progress = [
+            event for event in sender_socket.events if event["type"] == "progress"
+        ]
+        self.assertTrue(creator_progress)
+        self.assertEqual(sender_progress, [])
+        self.assertIn("drafting_reply", [event["phase"] for event in creator_progress])
+
+    async def test_phone_model_generates_reply_and_classification_in_one_call(self) -> None:
         assistant_response = server.AssistantResponse(
             reply="I'll work out a plan.",
             is_coding_request=True,
         )
-        generate_content = Mock(
-            return_value=type(
-                "Response",
-                (),
-                {"parsed": assistant_response, "text": assistant_response.model_dump_json()},
-            )()
-        )
-        client = cast(
-            Client,
-            SimpleNamespace(
-                models=SimpleNamespace(generate_content=generate_content)
-            ),
+        phone_chat = Mock(
+            return_value=assistant_response.model_dump_json()
         )
         session = server.Chatsession(
             Chat_log="Earlier context",
@@ -150,22 +192,75 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
             session_ID=4,
         )
 
-        result = server.generate_reply(
-            client,
+        with patch.object(server.phone_model, "chat", phone_chat):
+            result = server.generate_reply(
             session,
-            "Earlier context\nAlex: Build me a feature",
+            "[2026-01-01T12:00:00+00:00] Alex: Hi\n"
+            "[2026-01-01T12:00:01+00:00] AI: Hello, Alex.",
             "Selected skills: python",
             "Build me a feature",
-        )
+            )
 
         self.assertEqual(result, assistant_response)
-        generate_content.assert_called_once()
-        config = generate_content.call_args.kwargs["config"]
-        self.assertEqual(config["response_mime_type"], "application/json")
-        self.assertIs(config["response_schema"], server.AssistantResponse)
-        prompt = generate_content.call_args.kwargs["contents"]
-        self.assertIn("Build me a feature", prompt)
-        self.assertIn("Selected skills: python", prompt)
+        phone_chat.assert_called_once()
+        messages = phone_chat.call_args.args[0]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("Selected skills: python", messages[0]["content"])
+        self.assertEqual(
+            [message["role"] for message in messages[1:]],
+            ["user", "assistant", "user"],
+        )
+        self.assertEqual(messages[1]["content"], "Hi")
+        self.assertEqual(messages[2]["content"], "Hello, Alex.")
+        self.assertEqual(
+            messages[-1],
+            {"role": "user", "content": "Build me a feature"},
+        )
+        self.assertEqual(
+            phone_chat.call_args.kwargs["response_schema"],
+            server.AssistantResponse.model_json_schema(),
+        )
+
+    async def test_initial_greeting_is_followed_by_a_user_turn_in_model_history(
+        self,
+    ) -> None:
+        messages = server._conversation_messages(
+            "[2026-01-01T12:00:00+00:00] AI: Hello, Alex.",
+            "How are you?",
+        )
+
+        self.assertEqual(
+            messages,
+            [
+                {"role": "user", "content": "(Start a friendly conversation.)"},
+                {"role": "assistant", "content": "Hello, Alex."},
+                {"role": "user", "content": "How are you?"},
+            ],
+        )
+
+    async def test_phone_model_receives_structured_reply_schema(self) -> None:
+        assistant_response = server.AssistantResponse(
+            reply="I will keep you updated.",
+            is_coding_request=False,
+        )
+        session = server.Chatsession(
+            Chat_log="",
+            AI_persona="Helpful",
+            plr_name="Alex",
+            session_ID=4,
+        )
+
+        with patch.object(
+            server.phone_model,
+            "chat",
+            return_value=assistant_response.model_dump_json(),
+        ):
+            result = server.generate_reply(
+                session,
+                "",
+            )
+
+        self.assertEqual(result, assistant_response)
 
     async def test_custom_session_id_collision_is_rejected(self) -> None:
         await self._create_session(session_id=84)
@@ -198,7 +293,7 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"DISCOVERY_PORT": str(discovery_port)}):
             discovered = discover_servers(timeout=0.5)
         responder.join(timeout=2)
-        self.assertIn("http://127.0.0.1:8123", discovered)
+        self.assertIn("https://127.0.0.1:8123", discovered)
 
 
 if __name__ == "__main__":

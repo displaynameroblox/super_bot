@@ -11,12 +11,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
-from dotenv import load_dotenv
-from google import genai
+try:
+    from . import phone_model
+except ImportError:
+    import phone_model
 
 
-DEFAULT_MODEL = "gemini-3.8-flash"
 PROMPT_PLACEHOLDER = "{prompt}"
 MAX_PLAN_LENGTH = 20_000
 MAX_AGENT_OUTPUT = 200_000
@@ -99,6 +99,23 @@ PROVIDER_SPECS = {
         "website": "",
     },
 }
+
+# Fixed, vetted install commands. Anything not listed here (for example Cursor
+# Agent, whose official installer pipes a script into a shell) stays manual.
+INSTALL_STEPS: dict[str, list[list[str]]] = {
+    "copilot": [["npm", "install", "-g", "@github/copilot"]],
+    "claude": [["npm", "install", "-g", "@anthropic-ai/claude-code"]],
+    "codex": [["npm", "install", "-g", "@openai/codex"]],
+    "gemini": [["npm", "install", "-g", "@google/gemini-cli"]],
+    "opencode": [["npm", "install", "-g", "opencode-ai"]],
+    "amp": [["npm", "install", "-g", "@sourcegraph/amp"]],
+    "aider": [["pipx", "install", "aider-chat"]],
+}
+PREREQUISITE_INSTALLERS: dict[str, dict[str, list[str]]] = {
+    "npm": {"brew": ["brew", "install", "node"], "pkg": ["pkg", "install", "-y", "nodejs"]},
+    "pipx": {"brew": ["brew", "install", "pipx"]},
+}
+INSTALL_TIMEOUT_SECONDS = 900
 
 
 @dataclass
@@ -211,6 +228,67 @@ def discover_providers() -> list[dict[str, str | bool]]:
     return providers
 
 
+def install_plan(provider_id: str) -> list[list[str]]:
+    spec = PROVIDER_SPECS.get(provider_id)
+    if spec is None:
+        raise ValueError(f"Unknown coding agent: {provider_id}")
+    steps = INSTALL_STEPS.get(provider_id)
+    if not steps:
+        raise ValueError(
+            f"{spec['label']} has no automatic installer; install it manually."
+        )
+    plan: list[list[str]] = []
+    prepared: set[str] = set()
+    for step in steps:
+        tool = step[0]
+        if shutil.which(tool) is None and tool not in prepared:
+            installer = next(
+                (
+                    command
+                    for manager, command in PREREQUISITE_INSTALLERS.get(tool, {}).items()
+                    if shutil.which(manager)
+                ),
+                None,
+            )
+            if installer is None:
+                raise ValueError(
+                    f"'{tool}' is required but is not installed and cannot be "
+                    "installed automatically; install it, then retry."
+                )
+            plan.append(installer)
+            prepared.add(tool)
+        plan.append(step)
+    return plan
+
+
+def run_install(steps: list[list[str]]) -> tuple[int, str]:
+    log: list[str] = []
+    for argv in steps:
+        resolved = shutil.which(argv[0])
+        if resolved is None:
+            log.append(f"'{argv[0]}' was not found on PATH.")
+            return 127, "\n".join(log)[-MAX_AGENT_OUTPUT:]
+        log.append(f"$ {shlex.join(argv)}")
+        try:
+            result = subprocess.run(
+                [resolved, *argv[1:]],
+                cwd=Path.home(),
+                env=command_environment(),
+                capture_output=True,
+                text=True,
+                timeout=INSTALL_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Installation exceeded the {INSTALL_TIMEOUT_SECONDS // 60}-minute limit."
+            ) from exc
+        log.append(f"{result.stdout}{result.stderr}".strip())
+        if result.returncode:
+            return result.returncode, "\n".join(log)[-MAX_AGENT_OUTPUT:]
+    return 0, "\n".join(log)[-MAX_AGENT_OUTPUT:]
+
+
 def provider_template(provider_id: str) -> str:
     spec = PROVIDER_SPECS.get(provider_id)
     if spec is None:
@@ -283,36 +361,20 @@ def coding_history_text(history: list[dict[str, str]]) -> str:
     return text[-MAX_CODING_HISTORY_CHARS:] or "(No prior coding-mode discussion.)"
 
 
-def gemini_client(workspace: Path) -> genai.Client:
-    load_dotenv(workspace / ".env")
-    api_key = (
-        os.getenv("GEMINI_API_KEY")
-        or os.getenv("GEMINI_APT_KEY")
-        or os.getenv("GOOGLE_API_KEY")
-    )
-    if not api_key:
-        raise RuntimeError("Set GEMINI_API_KEY in the environment or project .env file.")
-    return genai.Client(api_key=api_key)
-
-
-def ask_gemini(
-    workspace: Path,
+def ask_phone_model(
     instruction: str,
     prompt: str,
     model: str | None = None,
+    response_schema: dict[str, Any] | None = None,
 ) -> str:
-    try:
-        client = gemini_client(workspace)
-        response = client.models.generate_content(
-            model=model or os.getenv("GEMINI_MODEL", DEFAULT_MODEL),
-            contents=prompt,
-            config={"system_instruction": instruction},
-        )
-    except (genai.errors.APIError, httpx.HTTPError, OSError, TimeoutError) as exc:
-        raise RuntimeError(f"Gemini request failed: {exc}") from exc
-    if not response.text:
-        raise RuntimeError("Gemini returned an empty response.")
-    return response.text.strip()
+    return phone_model.chat(
+        [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": prompt},
+        ],
+        response_schema=response_schema,
+        model=model,
+    )
 
 
 def make_plan(
@@ -324,8 +386,7 @@ def make_plan(
     workspace_context: str = "",
     chat_context: str = "",
 ) -> str:
-    return ask_gemini(
-        workspace,
+    return ask_phone_model(
         (
             "You are the planning assistant for a local coding agent. Turn the "
             "user's request and coding-mode discussion into a precise, bounded "
@@ -358,8 +419,7 @@ def detect_coding_request(
     chat_context: str = "",
     coding_history: list[dict[str, str]] | None = None,
 ) -> bool:
-    result = ask_gemini(
-        workspace,
+    result = ask_phone_model(
         (
             "Classify whether the user's message asks to create, modify, debug, "
             "review, test, explain implementation details of, or plan software or "
@@ -369,6 +429,7 @@ def detect_coding_request(
             "coding requests. Reply with only YES or NO."
         ),
         (
+            f"Workspace: {workspace}\n"
             f"Recent normal-chat context:\n{chat_context[-12_000:] or '(None)'}\n\n"
             f"Coding-mode discussion:\n"
             f"{coding_history_text(coding_history or [])}\n\n"
@@ -379,7 +440,7 @@ def detect_coding_request(
     )
     answer = result.strip().upper()
     if answer not in {"YES", "NO"}:
-        raise ValueError("Gemini returned an invalid coding-request classification.")
+        raise ValueError("Phone model returned an invalid coding-request classification.")
     return answer == "YES"
 
 
@@ -390,8 +451,7 @@ def refine_plan(
     model: str | None = None,
     coding_history: list[dict[str, str]] | None = None,
 ) -> str:
-    return ask_gemini(
-        workspace,
+    return ask_phone_model(
         (
             "You are helping the user refine a coding-agent brief. Discuss the "
             "brief and return an updated, complete brief. Do not execute commands "
@@ -399,6 +459,7 @@ def refine_plan(
             "not normal chat history."
         ),
         (
+            f"Workspace: {workspace}\n"
             f"Current brief:\n{plan}\n\n"
             f"Coding-mode discussion history:\n"
             f"{coding_history_text(coding_history or [])}\n\n"
@@ -413,8 +474,7 @@ def suggest_command(
     request: str,
     model: str | None = None,
 ) -> str:
-    result = ask_gemini(
-        workspace,
+    result = ask_phone_model(
         (
             "Produce exactly one command as a single executable followed by "
             "arguments, with no shell pipes, redirects, chaining, or expansion. "
@@ -424,15 +484,21 @@ def suggest_command(
         ),
         f"Workspace: {workspace}\nUser request: {request}",
         model,
+        response_schema={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
     )
     result = re.sub(r"^```(?:json)?\s*|\s*```$", "", result.strip())
     try:
         command_data = json.loads(result)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Gemini did not return valid command JSON: {exc}") from exc
+        raise ValueError(f"Phone model did not return valid command JSON: {exc}") from exc
     command = command_data.get("command") if isinstance(command_data, dict) else None
     if not isinstance(command, str) or not command.strip():
-        raise ValueError("Gemini's response did not contain a command.")
+        raise ValueError("Phone model's response did not contain a command.")
     return command.strip()
 
 

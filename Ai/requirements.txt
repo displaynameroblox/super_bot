@@ -1,5 +1,6 @@
+cryptography>=43
 fastapi
-google-genai
+httpx
 python-dotenv
-uvicorn[standard]
+uvicorn
 websockets>=14,<16

@@ -19,11 +19,27 @@ For more help, check out [the Rojo documentation](https://rojo.space/docs).
 ## AI Terminal App
 
 Install the Python app dependencies with `python -m pip install -r Ai/requirements.txt`.
-Set `GEMINI_APT_KEY` in the repository's `.env` file, then start the session
-server with `python -m Ai.server`. By default, the server listens on all
-interfaces at port `8000` and advertises itself to Super Bot clients on the
-local network using UDP port `8766`. Set `HOST`, `PORT`, or `DISCOVERY_PORT` to
-override those values.
+Run the local model server on a trusted Wi-Fi network as described in
+[Ai/termux/README.md](Ai/termux/README.md). In the repository's ignored `.env`
+file, set `PHONE_MODEL_BASE_URL` to the phone's address (for example,
+`http://192.168.1.42:8080/v1`) and `TEST_PHONE_API_KEY` to the key printed by
+the Termux server. Keep the key private. The local phone model uses the stable
+API name `superbot-phone`; optional `PHONE_MODEL_NAME` can override it.
+`PHONE_MODEL_TIMEOUT_SECONDS` defaults to 600. Then start the session server
+with `python -m Ai.server`. By default, it serves HTTPS on all interfaces at
+port `8000` and advertises itself to Super Bot clients on the local network
+using UDP port `8766`. Set `HOST`, `PORT`, or `DISCOVERY_PORT` to override those
+values.
+
+When starting the secure server from the Termux menu, choose whether to use the
+phone's local model or Google Gemini. The phone model is the default and needs
+`PHONE_MODEL_BASE_URL` and `TEST_PHONE_API_KEY`. Gemini needs a
+`GEMINI_API_KEY`; the Termux prompt hides the key and keeps it in memory only
+for that server run. You can set `PHONE_MODEL_PROVIDER=gemini` and
+`GEMINI_API_KEY` in the server environment or ignored `.env` file when starting
+`python -m Ai.server` directly. `GEMINI_MODEL_NAME` optionally selects a model
+(default `gemini-3.8-flash`). When Gemini is selected, conversation text is sent
+to Google's API; the startup banner identifies the selected provider.
 
 Start a client with `python -m Ai.chat_app`. It discovers servers on the local
 network; if none are found, it asks for a server address. Use `/connect` to
@@ -31,12 +47,117 @@ choose another server, `/new` to create a session, and `/login SESSION_ID` to
 join one. A session can be password-protected when it is created. Session data
 is held in server memory and is lost when the server stops. Passwords are
 stored as salted verifiers, while login tokens are saved in the client's local
-chat file. For each message, Gemini returns the chat reply and coding-request
-classification in one server-side model call. Recent chat context is bounded to
-reduce latency; actual response time still depends on Gemini and the network.
+chat file. The session server sends recent conversation history and the
+system instruction to the selected model; each response includes both the chat
+reply and coding-request classification. Coding briefs, classification,
+refinement, and command proposals use the same selected model. Proposed commands
+still require explicit approval, and coding-agent patches still require review.
+Conversation context is bounded; response time depends on the phone and network.
+
+If a coding CLI is missing, `/agent install NAME` (for example `/agent install claude`)
+shows the exact install commands and runs them only after you confirm with `y`.
+Installs use fixed commands for Copilot, Claude Code, Codex, Gemini, OpenCode,
+Amp (via `npm`), and Aider (via `pipx`); a missing `npm`/`pipx` is installed first
+through Homebrew (or `pkg` in Termux) when available. Cursor Agent has no
+automatic installer, so the command shows its official page instead.
+`git` is also required for the agent's isolated workspace and is not installed by the app.
+
+Set the AI's reply style with `/style`: pick a preset (`casual`, `formal`, `playful`,
+`friendly`, `technical`, `concise`) or write your own, for example
+`/style dry humour, one sentence max`. `/style off` clears it. You're also asked for a
+style at `/new`. The style is stored on the session server, applies to everyone in that
+session, and is separate from the persona, so changing it never rewrites the persona.
+
+Chat skills change how the AI behaves in conversation: `roleplay` (in-character replies
+with `*actions*`, which the client already highlights), `storyteller`, `copilot-brief`
+(helps you prepare a request for a coding agent), and `tutor`. `/new` asks which skills
+to use (up to three, comma separated), and the client sends them with the new session.
+Write your own with `/chatskill create NAME INSTRUCTIONS` (500 characters max); they are
+saved on your computer in `chat_skills.json` next to your chats, and `/chatskill delete
+NAME` removes one. The session server never stores a skill library or writes anything to
+disk: it only keeps the skills you sent in memory for the life of that session, exactly
+like the chat log. Each saved session remembers its skills locally. The session host can
+change them mid-session with `/chatskill use NAME`, `off NAME` or `clear`, and other
+participants receive them when they log in. Host status belongs to the login token issued
+when the session was created, so a host who logs in again with the password becomes an
+ordinary participant. Chat skills are separate from `/skill`, which is for the coding
+agent.
 
 UDP discovery only works on a reachable local subnet. For a server on another
 network, enter its reachable address manually; routers, firewalls, VPNs, and
-hotel/hotspot client isolation determine whether devices can connect. The
-default HTTP connection does not encrypt traffic, so use it only on trusted
-networks.
+hotel/hotspot client isolation determine whether devices can connect. Client
+connections are always HTTPS and end-to-end encrypted; see
+[Secure connections](#secure-connections-https-and-end-to-end-encryption).
+
+### Secure connections: HTTPS and end-to-end encryption
+
+The session server only speaks HTTPS. There is no plain-HTTP mode, and the
+client refuses `http://` addresses (a bare address such as `192.168.1.20:8000`
+means `https://192.168.1.20:8000`). On top of TLS, every request, response,
+session password, login token, and live event between a client and the server
+is end-to-end encrypted: the client seals it to the server's pinned key
+(X25519, HKDF-SHA256, ChaCha20-Poly1305) and only the Super Bot server process
+can open it. A proxy, tunnel, or Wi-Fi observer in between, even one that
+terminates TLS, sees only ciphertext and cannot tell which endpoint is being
+called. The session server and selected model provider (phone-hosted or Google
+Gemini) see your messages in plain text, because the AI endpoint must read them
+to answer.
+
+**First start.** `python -m Ai.server` creates a self-signed TLS certificate and
+an encryption key in a private directory and prints their fingerprints. They are
+reused on later starts. The directory is
+`~/Library/Application Support/super_bot/server` on macOS,
+`$XDG_DATA_HOME/super_bot/server` (default `~/.local/share/...`) on Linux, and
+`%APPDATA%\super_bot\server` on Windows; set `SUPER_BOT_SERVER_DIR` to change
+it. Keep that directory private and out of the repository. To use your own
+certificate, set `SSL_CERTFILE` and `SSL_KEYFILE` (plus `SSL_KEYFILE_PASSWORD`
+for an encrypted key).
+
+**First connect.** The first time a client connects to a server, it shows those
+same fingerprints and asks you to compare them with the ones the server printed,
+like SSH host keys. Answer `y` and they are saved in `known_servers.json` next
+to your chats; every later connection must match. If a fingerprint changes, the
+client refuses to connect: either the server's keys were reset or someone is
+intercepting the connection. `/server` shows the verified fingerprints, and
+`/server forget` clears them so `/connect` can verify the server again. A
+server whose certificate comes from a trusted authority needs no certificate
+pin; for a private authority, set `SUPER_BOT_CA_CERT` to its PEM file.
+
+| Setting | Purpose |
+|---------|---------|
+| `SSL_CERTFILE`, `SSL_KEYFILE`, `SSL_KEYFILE_PASSWORD` | Server: use your own certificate instead of the generated one |
+| `SUPER_BOT_SERVER_DIR` | Server: where the generated certificate and encryption key live |
+| `SUPER_BOT_CA_CERT` | Client: extra certificate authority to trust for the server's certificate |
+| `PHONE_MODEL_PROVIDER` | Server: `phone` (default) or `gemini` |
+| `GEMINI_API_KEY`, `GEMINI_MODEL_NAME` | Server: Gemini credentials and optional model name |
+| `PHONE_MODEL_CA_CERT` | Server: certificate to trust for an `https://` phone model link |
+
+Things to know:
+
+- The end-to-end layer has no forward secrecy against theft of the server's
+  encryption key (TLS still provides it on the wire), so protect that directory.
+- Requests carry a timestamp for replay protection, so client and server clocks
+  must agree within about five minutes.
+- Only `/health`, the server's public identity, and the encrypted endpoints are
+  reachable. The plain REST API, `/docs`, and `curl` access to it no longer
+  exist, so the Roblox script in `src/server/modules/ai_handler.luau` (plain
+  HTTP) needs a bridge that speaks this protocol.
+- With the phone model selected, the link from the session server to the phone
+  is separate from client connections. It stays plain HTTP unless you opt in
+  (see [Ai/termux/README.md](Ai/termux/README.md)), and the server prints a
+  warning at startup while it is unencrypted. Gemini mode instead sends chat
+  content directly to Google over HTTPS.
+
+### AI folder layout
+
+| Path | Purpose |
+|------|---------|
+| `Ai/server.py` | Session server (FastAPI) that routes chat to the selected model provider |
+| `Ai/gateway.py` | The only network-facing app: `/health`, the server identity, and the encrypted endpoints |
+| `Ai/e2ee.py`, `Ai/tls.py` | End-to-end encryption protocol; server TLS certificate handling |
+| `Ai/transport.py` | Client side: trusted-server store, pinned HTTPS, encrypted requests and events |
+| `Ai/phone_model.py` | Provider client for the phone model or Google Gemini |
+| `Ai/chat_app.py`, `Ai/coding_tools.py` | Terminal client and coding-agent tools |
+| `Ai/protocol.py` | Discovery constants shared by server and client |
+| `Ai/termux/` | Phone-side model manager and Mac helper script |
+| `Ai/tests/` | Test suite: `python -m pytest Ai` from the repository root |

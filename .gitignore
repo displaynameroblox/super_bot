@@ -12,4 +12,21 @@
 # Testing files
 /*testing
 
+# Skills
+/*SKILLS
+
 sourcemap.json
+
+# Python / macOS artifacts
+__pycache__/
+*.pyc
+.DS_Store
+*.bak
+.pytest_cache/
+.ruff_cache/
+
+# Server TLS/encryption keys and trusted-server pins (normally stored outside the repo)
+tls-private-key.pem
+tls-certificate.pem
+e2ee-identity.pem
+known_servers.json
