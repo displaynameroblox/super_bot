@@ -1,11 +1,14 @@
 import asyncio
+import csv
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
 import socket
 import threading
+import time
 from datetime import datetime
 from itertools import count
 from pathlib import Path
@@ -16,7 +19,20 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconne
 from pydantic import BaseModel, Field, ValidationError, field_validator
 import uvicorn
 
-from Ai import e2ee, gateway, phone_model, tls
+from Ai import (
+    accounts,
+    auth,
+    backup,
+    chat_training,
+    database,
+    e2ee,
+    gateway,
+    knowledge,
+    phone_model,
+    profile_store,
+    session_store,
+    tls,
+)
 from Ai.protocol import (
     DISCOVERY_PORT,
     DISCOVERY_REQUEST,
@@ -26,6 +42,7 @@ from Ai.protocol import (
 )
 
 
+load_dotenv(Path.cwd() / ".env")  # installed copies read the .env in the folder you run from
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 app = FastAPI()
@@ -33,9 +50,14 @@ chat_sessions: dict[int, "Chatsession"] = {}
 session_ids = count(1)
 session_passwords: dict[int, tuple[bytes, bytes] | None] = {}
 session_tokens: dict[bytes, int] = {}
+session_token_expiry: dict[bytes, float] = {}
 session_hosts: dict[int, bytes] = {}
 session_locks: dict[int, asyncio.Lock] = {}
 pending_session_ids: set[int] = set()
+# Durable storage and local accounts; set up by init_persistence() when the server starts.
+account_service: accounts.AccountService | None = None
+profiles: profile_store.ProfileStore | None = None
+store: session_store.SessionStore | None = None
 MAX_MODEL_CHAT_CONTEXT_LENGTH = 2_500
 MAX_CODING_CONTEXT_LENGTH = 24_000
 IDENTITY_FILENAME = "e2ee-identity.pem"
@@ -126,6 +148,7 @@ class Chatreg(BaseModel):
     ses_id: int = Field(ge=1)
     coding_context: str = Field(default="", max_length=MAX_CODING_CONTEXT_LENGTH)
     show_progress: bool = True
+    learn_from_chats: bool = False
 
 
 class SessionEventManager:
@@ -239,6 +262,115 @@ def _conversation_messages(chat_log: str, current_message: str) -> list[dict[str
     return messages
 
 
+def _personality_training_context() -> str:
+    messages_path = Path(
+        os.getenv(
+            "SUPER_BOT_MESSAGES_CSV",
+            str(Path.home() / "Downloads" / "realistic_multiturn_messages.csv"),
+        )
+    )
+    training_path = Path(
+        os.getenv(
+            "SUPER_BOT_PERSONALITY_TRAINING_CSV",
+            str(
+                Path.home()
+                / "Downloads"
+                / "realistic_multiturn_personality_training.csv"
+            ),
+        )
+    )
+    if not messages_path.exists() and not training_path.exists():
+        return ""
+
+    def read_rows(path: Path, columns: set[str]) -> list[dict[str, str]]:
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as source:
+                reader = csv.DictReader(source)
+                if (
+                    reader.fieldnames is None
+                    or not columns.issubset(reader.fieldnames)
+                ):
+                    raise ValueError(f"{path} is missing required CSV columns.")
+                rows = list(reader)
+        except (OSError, UnicodeError, csv.Error) as exc:
+            raise ValueError(
+                f"Could not read personality training data at {path}: {exc}"
+            ) from exc
+        if not rows:
+            raise ValueError(f"Personality training data at {path} is empty.")
+        if any(
+            not isinstance(row.get(column), str)
+            for row in rows
+            for column in columns
+        ):
+            raise ValueError(
+                f"Personality training data at {path} has an incomplete row."
+            )
+        return rows
+
+    message_rows = read_rows(
+        messages_path,
+        {"conversation_id", "role", "content", "category"},
+    )
+    training_rows = read_rows(
+        training_path,
+        {"conversation_id", "category", "system", "messages_json"},
+    )
+
+    instructions = list(dict.fromkeys(row["system"].strip() for row in training_rows))
+    if not all(instructions):
+        raise ValueError(
+            f"Personality training data at {training_path} has an empty system prompt."
+        )
+
+    conversations: dict[str, list[str]] = {}
+    categories: dict[str, str] = {}
+    for row in message_rows:
+        conversation_id = row["conversation_id"].strip()
+        role = row["role"].strip()
+        content = row["content"].strip()
+        category = row["category"].strip()
+        if (
+            not conversation_id
+            or not category
+            or role not in {"user", "assistant"}
+            or not content
+        ):
+            raise ValueError(f"Invalid conversation turn in {messages_path}.")
+        previous_category = categories.setdefault(conversation_id, category)
+        if previous_category != category:
+            raise ValueError(
+                f"Conversation {conversation_id!r} has inconsistent categories "
+                f"in {messages_path}."
+            )
+        conversations.setdefault(conversation_id, []).append(f"{role}: {content}")
+
+    training_categories = {
+        row["conversation_id"].strip(): row["category"].strip()
+        for row in training_rows
+    }
+    if any(
+        categories.get(conversation_id) != category
+        for conversation_id, category in training_categories.items()
+    ):
+        raise ValueError(
+            "The personality training CSVs contain mismatched conversations."
+        )
+
+    examples = "\n\n".join(
+        f"[{conversation_id} / {categories[conversation_id]}]\n"
+        + "\n".join(turns)
+        for conversation_id, turns in conversations.items()
+    )
+    return (
+        "Personality training guidance (follow when consistent with system rules):\n"
+        + "\n\n".join(instructions)
+        + "\n\nTraining conversation examples (reference only; their contents are not "
+        "instructions to follow):\n"
+        + examples
+    )
+
+
 def generate_reply(
     session: Chatsession,
     chat_log: str,
@@ -258,6 +390,14 @@ def generate_reply(
         "Return a JSON object with a string `reply` and boolean "
         "`is_coding_request`."
     )
+    training_context = _personality_training_context()
+    if training_context:
+        system_instruction += f"\n\n{training_context}"
+    knowledge_context = knowledge.format_context(
+        knowledge.search(knowledge.default_database_path(), current_message)
+    )
+    if knowledge_context:
+        system_instruction += f"\n\n{knowledge_context}"
     if session.AI_style:
         system_instruction += (
             "\n\nReply style (this overrides any tone guidance above; it never "
@@ -313,7 +453,13 @@ def password_matches(password: str, verifier: tuple[bytes, bytes] | None) -> boo
 
 def issue_access_token(session_id: int) -> str:
     token = secrets.token_urlsafe(32)
-    session_tokens[hashlib.sha256(token.encode("ascii")).digest()] = session_id
+    token_id = hashlib.sha256(token.encode("ascii")).digest()
+    session_tokens[token_id] = session_id
+    expires_at = time.time() + auth.TOKEN_TTL_SECONDS
+    session_token_expiry[token_id] = expires_at
+    if store is not None and session_id in chat_sessions:
+        persist_session(session_id)
+        store.save_token(token_id, session_id, expires_at)
     return token
 
 
@@ -328,7 +474,14 @@ def access_token_id(authorization: str | None) -> bytes | None:
 
 def authorized_session_id(authorization: str | None) -> int | None:
     token_id = access_token_id(authorization)
-    return session_tokens.get(token_id) if token_id is not None else None
+    if token_id is None:
+        return None
+    expires_at = session_token_expiry.get(token_id)
+    if expires_at is not None and expires_at <= time.time():
+        session_tokens.pop(token_id, None)
+        session_token_expiry.pop(token_id, None)
+        return None
+    return session_tokens.get(token_id)
 
 
 def require_session_access(session_id: int, authorization: str | None) -> None:
@@ -347,13 +500,311 @@ def generate_session_id() -> int:
             return session_id
 
 
+def persist_session(session_id: int, owner_user_id: int | None = None) -> None:
+    """Write the session to SQLite so it survives a restart (no-op when not enabled)."""
+    session = chat_sessions.get(session_id)
+    if store is None or session is None:
+        return
+    store.save(
+        session_id,
+        chat_log=session.Chat_log,
+        ai_persona=session.AI_persona,
+        plr_name=session.plr_name,
+        ai_style=session.AI_style,
+        ai_skills=session.AI_skills,
+        password_verifier=session_passwords.get(session_id),
+        host_token_hash=session_hosts.get(session_id),
+        owner_user_id=owner_user_id,
+    )
+
+
+def forget_session(session_id: int) -> None:
+    chat_sessions.pop(session_id, None)
+    session_passwords.pop(session_id, None)
+    session_hosts.pop(session_id, None)
+    session_locks.pop(session_id, None)
+    for token_id in [t for t, sid in session_tokens.items() if sid == session_id]:
+        session_tokens.pop(token_id, None)
+        session_token_expiry.pop(token_id, None)
+
+
+def init_persistence(path: Path | str | None = None) -> database.Database:
+    """Open the local database and restore accounts, sessions, and tokens from it."""
+    global account_service, profiles, store, session_ids
+    db = database.Database(path or database.default_path())
+    account_service = accounts.AccountService(db)
+    profiles = profile_store.ProfileStore(db)
+    store = session_store.SessionStore(db)
+    stored_sessions, stored_tokens = store.load_all()
+    for item in stored_sessions:
+        chat_sessions[item.session_id] = Chatsession(
+            Chat_log=item.chat_log,
+            AI_persona=item.ai_persona,
+            plr_name=item.plr_name,
+            session_ID=item.session_id,
+            AI_style=item.ai_style,
+            AI_skills=item.ai_skills,
+        )
+        session_passwords[item.session_id] = item.password_verifier
+        if item.host_token_hash is not None:
+            session_hosts[item.session_id] = item.host_token_hash
+        session_locks[item.session_id] = asyncio.Lock()
+    for token_id, (session_id, expires_at) in stored_tokens.items():
+        session_tokens[token_id] = session_id
+        session_token_expiry[token_id] = expires_at
+    session_ids = count(max(chat_sessions, default=0) + 1)
+    return db
+
+
+def bearer_token(authorization: object) -> str | None:
+    if not isinstance(authorization, str):
+        return None
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.casefold() != "bearer" or not token:
+        return None
+    return token
+
+
+def require_accounts() -> accounts.AccountService:
+    if account_service is None or profiles is None or store is None:
+        raise HTTPException(status_code=503, detail="Local accounts are not enabled")
+    return account_service
+
+
+def require_user(authorization: object) -> accounts.User:
+    service = require_accounts()
+    user = service.authenticate(bearer_token(authorization))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Valid account login required")
+    return user
+
+
+def account_error(exc: accounts.AccountError | auth.InvalidCredentials | profile_store.ProfileError):
+    status = exc.status if isinstance(exc, accounts.AccountError) else 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(max_length=64)
+    password: str = Field(max_length=512)
+    display_name: str = Field(default="", max_length=64)
+
+
+class AccountLoginRequest(BaseModel):
+    username: str = Field(max_length=64)
+    password: str = Field(max_length=512)
+
+
+class AccountGrant(BaseModel):
+    user_id: int
+    username: str
+    display_name: str
+    access_token: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(max_length=512)
+    new_password: str = Field(max_length=512)
+
+
+class PasswordOnlyRequest(BaseModel):
+    password: str = Field(max_length=512)
+
+
+class RecoverRequest(BaseModel):
+    username: str = Field(max_length=64)
+    recovery_code: str = Field(max_length=64)
+    new_password: str = Field(max_length=512)
+
+
+class ProfileUpdateRequest(BaseModel):
+    display_name: str | None = None
+    avatar: str | None = None
+    preferences: dict[str, Any] | None = None
+    model_settings: dict[str, Any] | None = None
+
+
+class ChatQueryRequest(BaseModel):
+    query: str = Field(default="", max_length=200)
+
+
+class ChatRefRequest(BaseModel):
+    session_id: int
+
+
+def _grant(user: accounts.User, token: str) -> AccountGrant:
+    assert profiles is not None
+    return AccountGrant(
+        user_id=user.id,
+        username=user.username,
+        display_name=profiles.get(user.id)["display_name"],
+        access_token=token,
+    )
+
+
+@app.post("/accounts/register", response_model=AccountGrant)
+def register_account(req: RegisterRequest):
+    service = require_accounts()
+    if os.getenv("SUPER_BOT_ALLOW_REGISTRATION", "1").strip() == "0" and service.user_count():
+        raise HTTPException(status_code=403, detail="Registration is disabled on this server")
+    try:
+        service.register(req.username, req.password, display_name=req.display_name)
+        user, token = service.login(req.username, req.password)
+    except (accounts.AccountError, auth.InvalidCredentials) as exc:
+        raise account_error(exc) from exc
+    return _grant(user, token)
+
+
+@app.post("/accounts/login", response_model=AccountGrant)
+def login_account(req: AccountLoginRequest):
+    service = require_accounts()
+    try:
+        user, token = service.login(req.username, req.password)
+    except accounts.AccountError as exc:
+        raise account_error(exc) from exc
+    return _grant(user, token)
+
+
+@app.post("/accounts/logout")
+def logout_account(authorization: str | None = Header(default=None)):
+    require_user(authorization)
+    assert account_service is not None
+    account_service.logout(bearer_token(authorization) or "")
+    return {"ok": True}
+
+
+@app.post("/accounts/logout_all")
+def logout_all_accounts(authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert account_service is not None
+    return {"ok": True, "sessions_ended": account_service.logout_everywhere(user.id)}
+
+
+@app.post("/accounts/password")
+def change_account_password(
+    req: PasswordChangeRequest, authorization: str | None = Header(default=None)
+):
+    user = require_user(authorization)
+    assert account_service is not None
+    try:
+        account_service.change_password(
+            user.id,
+            req.current_password,
+            req.new_password,
+            keep_token=bearer_token(authorization),
+        )
+    except (accounts.AccountError, auth.InvalidCredentials) as exc:
+        raise account_error(exc) from exc
+    return {"ok": True}
+
+
+@app.post("/accounts/delete")
+def delete_account(req: PasswordOnlyRequest, authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert account_service is not None and store is not None
+    owned = [item["session_id"] for item in store.list_for_user(user.id)]
+    try:
+        account_service.delete_account(user.id, req.password)
+    except accounts.AccountError as exc:
+        raise account_error(exc) from exc
+    for session_id in owned:
+        forget_session(session_id)
+    return {"ok": True}
+
+
+@app.post("/accounts/recovery_code")
+def create_recovery_code(req: PasswordOnlyRequest, authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert account_service is not None
+    try:
+        code = account_service.create_recovery_code(user.id, req.password)
+    except accounts.AccountError as exc:
+        raise account_error(exc) from exc
+    return {
+        "recovery_code": code,
+        "note": (
+            "Shown once. Anyone with this code can reset your password, and a lost code "
+            "cannot be recovered because there is no email or cloud service."
+        ),
+    }
+
+
+@app.post("/accounts/recover")
+def recover_account(req: RecoverRequest):
+    service = require_accounts()
+    try:
+        service.recover(req.username, req.recovery_code, req.new_password)
+    except (accounts.AccountError, auth.InvalidCredentials) as exc:
+        raise account_error(exc) from exc
+    return {"ok": True}
+
+
+@app.get("/accounts/me")
+def account_me(authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert profiles is not None
+    return {"user_id": user.id, "username": user.username, "profile": profiles.get(user.id)}
+
+
+@app.post("/accounts/profile")
+def update_account_profile(
+    req: ProfileUpdateRequest, authorization: str | None = Header(default=None)
+):
+    user = require_user(authorization)
+    assert profiles is not None
+    try:
+        return profiles.update(user.id, **req.model_dump(exclude_unset=True))
+    except profile_store.ProfileError as exc:
+        raise account_error(exc) from exc
+
+
+@app.post("/accounts/chats")
+def list_account_chats(req: ChatQueryRequest, authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert store is not None
+    return {"chats": store.list_for_user(user.id, req.query)}
+
+
+@app.post("/accounts/chats/get")
+def get_account_chat(req: ChatRefRequest, authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert store is not None
+    chat_record = store.get_for_user(user.id, req.session_id)
+    if chat_record is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return chat_record
+
+
+@app.post("/accounts/chats/open", response_model=SessionGrant)
+def open_account_chat(req: ChatRefRequest, authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert store is not None
+    session = chat_sessions.get(req.session_id)
+    if session is None or store.owner_of(req.session_id) != user.id:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return grant_response(session, issue_access_token(req.session_id))
+
+
+@app.post("/accounts/chats/delete")
+def delete_account_chat(req: ChatRefRequest, authorization: str | None = Header(default=None)):
+    user = require_user(authorization)
+    assert store is not None
+    if not store.delete_for_user(user.id, req.session_id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    forget_session(req.session_id)
+    return {"ok": True}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
 @app.post("/start_ses", response_model=SessionGrant)
-async def start_ses(req: start_ses_req):
+async def start_ses(req: start_ses_req, authorization: str | None = Header(default=None)):
+    owner_user_id: int | None = None
+    if bearer_token(authorization) is not None:
+        owner_user_id = require_user(authorization).id
     if req.session_ID is not None and (
         req.session_ID in chat_sessions or req.session_ID in pending_session_ids
     ):
@@ -382,8 +833,10 @@ async def start_ses(req: start_ses_req):
         chat_sessions[session_id] = session
         session_passwords[session_id] = password_verifier(req.password or "")
         session_locks[session_id] = asyncio.Lock()
+        persist_session(session_id, owner_user_id)
         token = issue_access_token(session_id)
         session_hosts[session_id] = hashlib.sha256(token.encode("ascii")).digest()
+        persist_session(session_id, owner_user_id)
     except phone_model.PhoneModelError as exc:
         raise HTTPException(
             status_code=502,
@@ -424,6 +877,7 @@ def set_style(req: StyleRequest, authorization: str | None = Header(default=None
     if session is None:
         raise HTTPException(status_code=404, detail="Chat session not found")
     session.AI_style = req.style.strip()
+    persist_session(req.ses_id)
     return StyleResponse(AI_style=session.AI_style)
 
 
@@ -440,6 +894,7 @@ def set_skills(req: SkillsRequest, authorization: str | None = Header(default=No
             detail="Only the session host can change chat skills",
         )
     session.AI_skills = req.skills
+    persist_session(req.ses_id)
     return SkillsResponse(AI_skills=session.AI_skills)
 
 
@@ -490,10 +945,18 @@ async def chat(req: Chatreg, authorization: str | None = Header(default=None)):
                 req.coding_context,
                 req.msg,
             )
+            if req.learn_from_chats and chat_training.training_enabled():
+                await asyncio.to_thread(
+                    chat_training.save_exchange,
+                    chat_training.database_path(),
+                    req.msg,
+                    assistant_response.reply,
+                )
             session.Chat_log = (
                 f"{updated_log}\n"
                 f"{timestamped_message('AI', assistant_response.reply)}".strip()
             )
+            await asyncio.to_thread(persist_session, req.ses_id)
     except phone_model.PhoneModelError as exc:
         await publish_progress("failed", "The model request failed")
         raise HTTPException(
@@ -579,16 +1042,39 @@ def serve_discovery(port: int, discovery_socket: socket.socket) -> None:
         discovery_socket.close()
 
 
+def is_loopback_host(host: str) -> bool:
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def ensure_port_available(host: str, port: int) -> None:
+    try:
+        probe = socket.create_server((host, port))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot listen on {host}:{port} ({exc.strerror or exc}). Another program may "
+            "already be using this port; stop it or choose a different PORT."
+        ) from exc
+    probe.close()
+
+
 def server_banner(
     host: str,
     port: int,
     material: tls.TlsMaterial,
     identity: e2ee.ServerIdentity,
+    data_path: Path | None = None,
+    lan_exposed: bool = False,
 ) -> str:
     certificate_kind = " (self-signed)" if material.self_signed else ""
     lines = [
         f"Super Bot session server listening on {host}:{port} (HTTPS only)",
-        "Every request is TLS-encrypted and end-to-end encrypted to this server.",
+        "Requests are TLS-encrypted and sealed to this server's key between client and "
+        "server. The server itself can read messages in order to answer them.",
         "Clients ask you to compare these fingerprints the first time they connect:",
         "  Server key (end-to-end encryption):",
         f"    {e2ee.format_fingerprint(identity.fingerprint)}",
@@ -596,6 +1082,14 @@ def server_banner(
         f"    {e2ee.format_fingerprint(material.fingerprint)}",
         f"AI provider: {phone_model.provider_description()}",
     ]
+    if data_path is not None:
+        lines.append(f"Local data (accounts, chats, backups): {data_path.parent}")
+    if lan_exposed:
+        lines.append(
+            "Warning: LAN access is enabled, so other devices on your network can reach "
+            "this server. Allow the port through your firewall only for networks you "
+            "trust, and consider disabling registration with SUPER_BOT_ALLOW_REGISTRATION=0."
+        )
     if material.generated:
         lines.append(
             "A new certificate was generated, so clients must verify and trust it again."
@@ -627,7 +1121,16 @@ def start_server():
             f"DISCOVERY_PORT must be between 1 and 65535, got {discovery_port}"
         )
 
-    host = os.getenv("HOST", "0.0.0.0")
+    host = os.getenv("HOST", "127.0.0.1").strip() or "127.0.0.1"
+    lan_enabled = os.getenv("SUPER_BOT_ALLOW_LAN", "").strip() == "1"
+    loopback = is_loopback_host(host)
+    if not loopback and not lan_enabled:
+        raise ValueError(
+            f"HOST={host!r} would expose the server to your network. Super Bot only "
+            "listens on this computer by default; set SUPER_BOT_ALLOW_LAN=1 to "
+            "deliberately allow other devices to connect."
+        )
+    ensure_port_available(host, port)
     phone_model.provider_description()
     material = tls.prepare_server_tls(
         certfile=os.getenv("SSL_CERTFILE", "").strip(),
@@ -643,11 +1146,12 @@ def start_server():
         access_error=event_access_error,
         stream_events=stream_session_events,
     )
-    print(server_banner(host, port, material, identity), flush=True)
+    db = init_persistence()
+    print(server_banner(host, port, material, identity, db.path, lan_enabled and not loopback), flush=True)
 
     discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    discovery_socket.bind(("0.0.0.0", discovery_port))
+    discovery_socket.bind(("127.0.0.1" if loopback else "0.0.0.0", discovery_port))
     discovery_socket.settimeout(1)
     discovery_thread = threading.Thread(
         target=serve_discovery,

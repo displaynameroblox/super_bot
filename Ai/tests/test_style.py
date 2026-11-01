@@ -1,4 +1,9 @@
+import csv
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
@@ -53,6 +58,67 @@ class ServerStyleTests(unittest.TestCase):
     def test_prompt_has_no_style_section_when_unset(self) -> None:
         prompt = self.system_prompt_for(self.make_session(""))
         self.assertNotIn("Reply style", prompt)
+
+    def test_training_csvs_are_included_as_personality_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            messages_path = Path(temp_dir) / "messages.csv"
+            training_path = Path(temp_dir) / "training.csv"
+            with messages_path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(
+                    output,
+                    fieldnames=[
+                        "conversation_id",
+                        "turn_index",
+                        "role",
+                        "content",
+                        "category",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "conversation_id": "warmth",
+                        "turn_index": "1",
+                        "role": "assistant",
+                        "content": "That sounds like a lovely plan.",
+                        "category": "casual_warmth",
+                    }
+                )
+            with training_path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(
+                    output,
+                    fieldnames=[
+                        "conversation_id",
+                        "category",
+                        "system",
+                        "messages_json",
+                        "turn_count",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "conversation_id": "warmth",
+                        "category": "casual_warmth",
+                        "system": "Be natural, warm, and concise.",
+                        "messages_json": json.dumps(
+                            [{"role": "assistant", "content": "That sounds lovely."}]
+                        ),
+                        "turn_count": "1",
+                    }
+                )
+            with patch.dict(
+                os.environ,
+                {
+                    "SUPER_BOT_MESSAGES_CSV": str(messages_path),
+                    "SUPER_BOT_PERSONALITY_TRAINING_CSV": str(training_path),
+                },
+            ):
+                prompt = self.system_prompt_for(self.make_session(""))
+
+        self.assertIn("Be natural, warm, and concise.", prompt)
+        self.assertIn("That sounds like a lovely plan.", prompt)
+        self.assertIn("reference only", prompt)
 
     def test_style_endpoint_requires_a_valid_token(self) -> None:
         request = server.StyleRequest(ses_id=1, style="formal")

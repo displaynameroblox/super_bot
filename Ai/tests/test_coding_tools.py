@@ -1186,6 +1186,7 @@ class CodingToolsTests(unittest.TestCase):
             "session-token",
             "",
             True,
+            False,
         )
 
     def test_workspace_cannot_change_with_agent_patch_pending(self) -> None:

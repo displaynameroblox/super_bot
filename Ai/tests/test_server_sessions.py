@@ -1,10 +1,14 @@
 import asyncio
 import hashlib
+import json
 import os
+import sqlite3
 import socket
 import threading
+import tempfile
 import unittest
 from itertools import count
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
@@ -130,6 +134,57 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_reply.call_args.args[3], "Please help")
         self.assertEqual(websocket.events[-1]["type"], "message")
         self.assertEqual(websocket.events[-1]["chat_log"], response.Chat_log)
+
+    async def test_chat_training_requires_both_client_and_server_opt_in(self) -> None:
+        grant = await self._create_session()
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "chat-training.sqlite"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "SUPER_BOT_COLLECT_CHAT_TRAINING": "1",
+                        "SUPER_BOT_CHAT_TRAINING_DB": str(database),
+                    },
+                ),
+                patch.object(
+                    server,
+                    "generate_reply",
+                    return_value=server.AssistantResponse(
+                        reply="I will keep answers brief.",
+                        is_coding_request=False,
+                    ),
+                ),
+            ):
+                await server.chat(
+                    server.Chatreg(
+                        ses_id=grant.session_ID,
+                        msg="Please keep answers brief.",
+                        learn_from_chats=True,
+                    ),
+                    authorization=f"Bearer {grant.access_token}",
+                )
+                await server.chat(
+                    server.Chatreg(
+                        ses_id=grant.session_ID,
+                        msg="This message is not opted in.",
+                        learn_from_chats=False,
+                    ),
+                    authorization=f"Bearer {grant.access_token}",
+                )
+
+            with sqlite3.connect(database) as connection:
+                rows = connection.execute(
+                    "SELECT messages_json FROM exchanges"
+                ).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(
+                json.loads(rows[0][0]),
+                [
+                    {"role": "user", "content": "Please keep answers brief."},
+                    {"role": "assistant", "content": "I will keep answers brief."},
+                ],
+            )
 
     async def test_progress_is_visible_to_creator_and_opted_in_sender_only(self) -> None:
         creator = await self._create_session()

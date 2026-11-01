@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "super-bot"
+version = "1.0.0"
+description = "Local-first Super Bot chat server with accounts, encrypted clients and a local web client"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "argon2-cffi>=23",
+    "cryptography>=43",
+    "fastapi",
+    "huggingface_hub>=0.27,<2",
+    "httpx",
+    "pypdf>=5,<7",
+    "python-dotenv",
+    "uvicorn",
+    "websockets>=14,<16",
+    "windows-curses; platform_system == 'Windows'",
+]
+
+[project.urls]
+Homepage = "https://github.com/displaynameroblox/super_bot"
+
+[project.scripts]
+super-bot-server = "Ai.server:start_server"
+super-bot = "Ai.chat_app:main"
+super-bot-account = "Ai.account_app:main"
+super-bot-web = "Ai.web_client:main"
+super-bot-manager = "Ai.local_manager:main"
+
+[tool.setuptools]
+packages = ["Ai"]
+
+[tool.setuptools.package-data]
+Ai = ["web/*.html", "web/*.js", "web/*.css", "*.ipynb"]

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import coding_tools, tls, transport
+    from . import coding_tools, preflight, tls, transport
     from .protocol import (
         CHAT_SKILLS,
         DISCOVERY_PORT,
@@ -37,6 +37,7 @@ try:
     )
 except ImportError:
     import coding_tools
+    import preflight
     import tls
     import transport
     from protocol import (
@@ -122,6 +123,9 @@ MESSAGES AND PROGRESS
                               delays increase by 5 seconds each time.
 /progress on|off              Show or hide progress for your own messages.
                               The session host can always see everyone's progress.
+/learn on|off                 Opt your future messages and AI replies in this
+                              session into the server's local training queue.
+                              This requires server collection to be enabled.
 
 CODING WORKFLOW
 /code REQUEST                 Ask the phone model to prepare a coding brief.
@@ -211,6 +215,7 @@ class ChatSession:
     access_token: str = ""
     server_url: str = ""
     chat_skills: dict[str, str] = field(default_factory=dict)
+    learn_from_chats: bool = False
 
 
 @dataclass
@@ -304,6 +309,11 @@ def load_sessions(path: Path) -> list[ChatSession]:
             for name, text in chat_skills.items()
         ):
             raise ValueError(f"Saved chat #{index} in {path} has invalid chat skills")
+        learning_preference = item.get("learn_from_chats", False)
+        if not isinstance(learning_preference, bool):
+            raise ValueError(
+                f"Saved chat #{index} in {path} has invalid learning preference"
+            )
         session_data = {
             key: value
             for key, value in item.items()
@@ -593,6 +603,7 @@ def send_message(
     access_token: str,
     coding_context: str = "",
     show_progress: bool = True,
+    learn_from_chats: bool = False,
 ) -> dict[str, Any]:
     return request_json(
         base_url,
@@ -602,6 +613,7 @@ def send_message(
             "msg": message,
             "coding_context": coding_context,
             "show_progress": show_progress,
+            "learn_from_chats": learn_from_chats,
         },
         access_token=access_token,
     )
@@ -2203,6 +2215,7 @@ class ChatApp:
             session.access_token,
             coding_context,
             self.ui_preferences.show_progress,
+            session.learn_from_chats,
         )
 
     def _confirm_coding_mode(self) -> bool:
@@ -2339,6 +2352,34 @@ class ChatApp:
             self.status = (
                 "Your message progress is "
                 f"{'visible' if self.ui_preferences.show_progress else 'hidden'}"
+            )
+        elif action == "/learn" and len(parts) == 2 and parts[1].casefold() in {"on", "off"}:
+            session = self.active_session
+            if session is None:
+                self.status = "Error: create or open a session before changing chat learning"
+                return
+            previous_preference = session.learn_from_chats
+            session.learn_from_chats = parts[1].casefold() == "on"
+            try:
+                save_sessions(self.data_file, self.sessions)
+            except OSError as exc:
+                session.learn_from_chats = previous_preference
+                self.status = f"Error saving chat-learning preference: {exc}"
+                return
+            self.status = (
+                "Future messages from this client may be stored locally for training "
+                "if the server operator enabled SUPER_BOT_COLLECT_CHAT_TRAINING=1. "
+                "Do not opt in private or sensitive content."
+                if session.learn_from_chats
+                else "Future messages from this client will not be added to the training queue"
+            )
+        elif action == "/learn" and len(parts) == 1:
+            session = self.active_session
+            self.status = (
+                "Chat learning is "
+                f"{'on' if session.learn_from_chats else 'off'} for this session"
+                if session is not None
+                else "Error: create or open a session first"
             )
         elif action == "/code" and argument:
             self._start_plan(argument)
@@ -3770,6 +3811,7 @@ class ChatApp:
             session.access_token,
             self.pending_message_coding_context,
             self.ui_preferences.show_progress,
+            session.learn_from_chats,
         )
 
     def _cancel_message_retry(self) -> None:
@@ -3821,7 +3863,14 @@ def main() -> int:
         default=None,
         help="override the saved project directory for the phone model and coding agents",
     )
+    parser.add_argument(
+        "--skip-tests",
+        action="store_true",
+        help="start without running the test suite first",
+    )
     args = parser.parse_args()
+    if not preflight.ensure_tests_pass(args.skip_tests):
+        return 1
     workspace = args.workspace.expanduser().resolve() if args.workspace else None
     if workspace is not None and not workspace.is_dir():
         print(f"Workspace is not a directory: {workspace}", file=sys.stderr)

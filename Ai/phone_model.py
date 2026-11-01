@@ -18,6 +18,7 @@ PHONE_PROVIDER = "phone"
 GEMINI_PROVIDER = "gemini"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
+load_dotenv(Path.cwd() / ".env")  # installed copies read the .env in the folder you run from
 load_dotenv(REPOSITORY_ROOT / ".env")
 
 

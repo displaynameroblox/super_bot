@@ -1,6 +1,9 @@
+argon2-cffi>=23
 cryptography>=43
 fastapi
+huggingface_hub>=0.27,<2
 httpx
+pypdf>=5,<7
 python-dotenv
 uvicorn
 websockets>=14,<16

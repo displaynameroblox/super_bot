@@ -57,6 +57,20 @@ class LegacyServerUrlTests(unittest.TestCase):
             self.assertEqual(load_sessions(path), sessions)
             self.assertIn("https://192.168.1.20:8000", path.read_text(encoding="utf-8"))
 
+    def test_chat_learning_preference_round_trips_and_defaults_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "chat_sessions.json"
+            legacy = ChatSession("old", "Alex", "p", "", 4)
+            self.assertFalse(legacy.learn_from_chats)
+            enabled = ChatSession(
+                "new", "Alex", "p", "", 5, learn_from_chats=True
+            )
+            save_sessions(path, [legacy, enabled])
+            self.assertEqual(
+                [session.learn_from_chats for session in load_sessions(path)],
+                [False, True],
+            )
+
 
 class AppTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -75,6 +89,51 @@ class AppTestCase(unittest.TestCase):
 
     def inspect(self, live: transport.ServerInfo):
         return patch.object(transport, "inspect_server", return_value=live)
+
+
+class ChatLearningRequestTests(unittest.TestCase):
+    def test_opt_in_is_included_in_the_encrypted_chat_request_payload(self) -> None:
+        with patch.object(chat_app, "request_json", return_value={}) as request:
+            chat_app.send_message(
+                "https://server.example",
+                7,
+                "Teach the assistant this preference",
+                "token",
+                learn_from_chats=True,
+            )
+        self.assertEqual(request.call_args.args[2]["learn_from_chats"], True)
+
+    def test_learn_command_persists_opt_in_and_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = ChatSession("id", "Alex", "p", "", 7)
+            app = ChatApp.__new__(ChatApp)
+            app.pending_message = ""
+            app.sessions = [session]
+            app.active_index = 0
+            app.data_file = Path(directory) / "chats.json"
+            app.status = ""
+
+            app.handle_command("/learn on")
+            self.assertTrue(session.learn_from_chats)
+            self.assertIn("SUPER_BOT_COLLECT_CHAT_TRAINING=1", app.status)
+            self.assertTrue(load_sessions(app.data_file)[0].learn_from_chats)
+
+            app.handle_command("/learn off")
+            self.assertFalse(session.learn_from_chats)
+            self.assertFalse(load_sessions(app.data_file)[0].learn_from_chats)
+
+    def test_learn_command_rolls_back_preference_if_save_fails(self) -> None:
+        session = ChatSession("id", "Alex", "p", "", 7)
+        app = ChatApp.__new__(ChatApp)
+        app.pending_message = ""
+        app.sessions = [session]
+        app.active_index = 0
+        app.data_file = Path("unused.json")
+        app.status = ""
+        with patch.object(chat_app, "save_sessions", side_effect=OSError("disk full")):
+            app.handle_command("/learn on")
+        self.assertFalse(session.learn_from_chats)
+        self.assertIn("disk full", app.status)
 
 
 class VerifyServerTests(AppTestCase):

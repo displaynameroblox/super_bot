@@ -35,6 +35,14 @@ ALLOWED_ROUTES = (
     ("POST", re.compile(r"/style")),
     ("POST", re.compile(r"/skills")),
     ("GET", re.compile(r"/chat/[0-9]{1,18}")),
+    (
+        "POST",
+        re.compile(
+            r"/accounts/(register|login|logout|logout_all|password|delete|recovery_code"
+            r"|recover|profile|chats|chats/get|chats/open|chats/delete)"
+        ),
+    ),
+    ("GET", re.compile(r"/accounts/me")),
 )
 EVENTS_PATH = re.compile(r"/events/([0-9]{1,18})")
 HELLO_TIMEOUT_SECONDS = 10

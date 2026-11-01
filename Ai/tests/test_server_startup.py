@@ -21,6 +21,7 @@ class StartServerTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.directory = Path(directory.name)
+        self.addCleanup(self.reset_server_state)
         self.environment = {
             "SUPER_BOT_SERVER_DIR": str(self.directory / "server"),
             "PORT": "8443",
@@ -33,6 +34,19 @@ class StartServerTests(unittest.TestCase):
             "PHONE_MODEL_NAME": "superbot-phone",
             "PHONE_MODEL_BASE_URL": "https://192.168.1.42:8080/v1",
         }
+
+    @staticmethod
+    def reset_server_state() -> None:
+        server.account_service = server.profiles = server.store = None
+        for state in (
+            server.chat_sessions,
+            server.session_passwords,
+            server.session_tokens,
+            server.session_token_expiry,
+            server.session_hosts,
+            server.session_locks,
+        ):
+            state.clear()
 
     def start(self, **overrides: str):
         environment = {**self.environment, **overrides}
@@ -129,8 +143,53 @@ class StartServerTests(unittest.TestCase):
     def test_the_discovery_responder_still_starts(self) -> None:
         _, socket_module, threading_module, _ = self.start()
 
-        socket_module.socket.return_value.bind.assert_called_once_with(("0.0.0.0", 18766))
+        socket_module.socket.return_value.bind.assert_called_once_with(("127.0.0.1", 18766))
         threading_module.Thread.return_value.start.assert_called_once_with()
+
+    def test_the_server_is_local_only_unless_lan_access_is_opted_into(self) -> None:
+        run, _, _, _ = self.start()
+        self.assertEqual(run.call_args.kwargs["host"], "127.0.0.1")
+
+        with (
+            patch.dict(os.environ, {**self.environment, "HOST": "0.0.0.0"}),
+            patch.object(server.uvicorn, "run") as blocked_run,
+        ):
+            with self.assertRaisesRegex(ValueError, "SUPER_BOT_ALLOW_LAN"):
+                server.start_server()
+        blocked_run.assert_not_called()
+
+        run, socket_module, _, banner = self.start(HOST="0.0.0.0", SUPER_BOT_ALLOW_LAN="1")
+        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
+        socket_module.socket.return_value.bind.assert_called_once_with(("0.0.0.0", 18766))
+        self.assertIn("LAN access is enabled", banner)
+
+    def test_a_busy_port_stops_startup_with_a_clear_message(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.dict(os.environ, self.environment),
+            patch.object(server.uvicorn, "run") as run,
+            patch.object(server, "socket") as socket_module,
+            contextlib.redirect_stdout(output),
+        ):
+            socket_module.create_server.side_effect = OSError(98, "Address already in use")
+            with self.assertRaisesRegex(RuntimeError, "already be using this port"):
+                server.start_server()
+        run.assert_not_called()
+
+    def test_sessions_are_durable_across_a_server_restart(self) -> None:
+        self.start()
+        self.assertIsNotNone(server.store)
+        server.chat_sessions.clear()
+        server.chat_sessions[41] = server.Chatsession(
+            Chat_log="hello", AI_persona="p", plr_name="Alex", session_ID=41
+        )
+        server.persist_session(41)
+        token = server.issue_access_token(41)
+        server.chat_sessions.clear()
+        server.session_tokens.clear()
+        self.start()  # a fresh start reloads everything from SQLite
+        self.assertEqual(server.chat_sessions[41].Chat_log, "hello")
+        self.assertEqual(server.authorized_session_id(f"Bearer {token}"), 41)
 
     def test_a_plain_http_phone_link_is_called_out(self) -> None:
         _, _, _, banner = self.start(PHONE_MODEL_BASE_URL="http://192.168.1.42:8080/v1")

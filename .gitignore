@@ -30,3 +30,8 @@ tls-private-key.pem
 tls-certificate.pem
 e2ee-identity.pem
 known_servers.json
+
+# Packaging
+build/
+dist/
+*.egg-info/
