@@ -10,10 +10,28 @@ before upgrading. Python package version: `2.1.0a1`.
 | --- | --- |
 | Linux | Working (maintainer-tested) |
 | macOS | Working (maintainer-tested) |
-| Windows | Not working; unsupported for this alpha |
+| Windows | Partially working; known failures remain (see results below) |
 
 Exact distributions, OS versions and hardware have not been recorded here.
 The supported-platform CI matrix covers Linux and macOS.
+
+### Windows and cross-platform test results
+
+Maintainer-reported manual testing for this alpha (November 7, 2026):
+
+| Component | Result |
+| --- | --- |
+| Wheel installation | Passed |
+| Windows server startup | Passed |
+| Windows TUI → local server | Passed |
+| Mac TUI → Windows server | Passed |
+| Windows TUI → Mac server | Silent crash |
+| Server lookup | Failed |
+| Model downloads | Failed |
+
+TUI means the terminal interface. Windows support is experimental: successful
+installation and local-server use do not mean every workflow works. The cause of
+the silent crash and the lookup/download failures has not yet been established.
 
 See the [alpha release notes](docs/releases/v2.1.0.alpha.1.md).
 
@@ -40,8 +58,9 @@ with `init --config FILE --server-data DIR` after stopping the old server.
 
 ## Download and install (AI server and clients)
 
-You need **Python 3.10 or newer**, Git for source installation, and Linux or
-macOS. A model provider must be configured separately; installing Super Bot does
+You need **Python 3.10 or newer** and Git for source installation. Linux and
+macOS are supported; Windows is experimental with the failures listed above.
+A model provider must be configured separately; installing Super Bot does
 not download a model. Local inference keeps model requests local; selecting a
 cloud provider sends model context to that provider.
 
