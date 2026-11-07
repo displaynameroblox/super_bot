@@ -56,6 +56,9 @@ PASSTHROUGH_ROUTES = {
     "chats",
     "chats/get",
     "chats/delete",
+    "knowledge",
+    "knowledge/add",
+    "knowledge/delete",
 }
 ENDS_ACCOUNT_SESSION = {"logout", "logout_all", "delete"}
 
@@ -195,8 +198,17 @@ def build_web_app(backend: Backend, port: int) -> FastAPI:
         if route == "me" and request.method == "GET":
             status, data = await backend("GET", "/accounts/me", None, token)
             return reply(status, data, clear=status == 401)
+        if route == "knowledge" and request.method == "GET":
+            status, data = await backend("GET", "/accounts/knowledge", None, token)
+            return reply(status, data, clear=status == 401)
         if request.method != "POST":
             return reply(404, {"detail": "Not Found"})
+        if route == "leave":
+            for (account, sid), chat_token in tuple(chat_tokens.items()):
+                if account == token:
+                    await backend("POST", "/sessions/leave", {"session_id": sid}, chat_token)
+                    chat_tokens.pop((account, sid), None)
+            return reply(200, {"ok": True})
         if route == "sessions":
             return await create_session(body, token)
         if route == "send":

@@ -4,22 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "super-bot"
-version = "1.0.0"
+version = "2.1.0a1"
 description = "Local-first Super Bot chat server with accounts, encrypted clients and a local web client"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "argon2-cffi>=23",
-    "cryptography>=43",
-    "fastapi",
-    "huggingface_hub>=0.27,<2",
-    "httpx",
-    "pypdf>=5,<7",
-    "python-dotenv",
-    "uvicorn",
-    "websockets>=14,<16",
-    "windows-curses; platform_system == 'Windows'",
-]
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+models = ["huggingface_hub>=0.27,<2"]
+pdf = ["pypdf>=5,<7"]
 
 [project.urls]
 Homepage = "https://github.com/displaynameroblox/super_bot"
@@ -33,6 +26,10 @@ super-bot-manager = "Ai.local_manager:main"
 
 [tool.setuptools]
 packages = ["Ai"]
+include-package-data = false
 
 [tool.setuptools.package-data]
-Ai = ["web/*.html", "web/*.js", "web/*.css", "*.ipynb"]
+Ai = ["web/*.html", "web/*.js", "web/*.css", "*.ipynb", "requirements.txt", "release-public.pem"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["Ai/requirements.txt"]}

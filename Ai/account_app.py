@@ -12,14 +12,16 @@ import argparse
 import getpass
 import http.client
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 try:
-    from . import chat_app, preflight, tls, transport
+    from . import client_data, chat_app, preflight, tls, transport
 except ImportError:
+    from Ai import client_data
     import chat_app
     import preflight
     import tls
@@ -34,6 +36,11 @@ Commands
   /open ID           resume one of your chats
   /delete ID         delete one of your chats
   /profile NAME      change your display name
+  /knowledge         list your indexed knowledge sources
+  /knowledge add FILE [CATEGORY]
+                    index a local text file in your private knowledge library
+  /knowledge delete ID
+                    remove one knowledge source
   /password          change your password
   /recovery          create a recovery code (shown once)
   /logout            sign out of this device
@@ -58,7 +65,7 @@ class AccountClient:
 
     def __init__(self, base_url: str, requester: Requester | None = None) -> None:
         self.base_url = base_url
-        self.requester = requester or transport.secure_request
+        self.requester = requester or client_data.request
         self.token = ""
         self.username = ""
         self.display_name = ""
@@ -121,6 +128,32 @@ class AccountClient:
     def delete_chat(self, session_id: int) -> None:
         self.call("POST", "/accounts/chats/delete", {"session_id": session_id})
 
+    def knowledge_sources(self) -> list[dict[str, Any]]:
+        return self.call("GET", "/accounts/knowledge")["sources"]
+
+    def add_knowledge(
+        self,
+        *,
+        source_url: str,
+        title: str,
+        content: str,
+        category: str,
+    ) -> int:
+        response = self.call(
+            "POST",
+            "/accounts/knowledge/add",
+            {
+                "source_url": source_url,
+                "title": title,
+                "content": content,
+                "category": category,
+            },
+        )
+        return int(response["passages"])
+
+    def delete_knowledge(self, source_id: int) -> None:
+        self.call("POST", "/accounts/knowledge/delete", {"source_id": source_id})
+
     def set_display_name(self, name: str) -> None:
         profile = self.call("POST", "/accounts/profile", {"display_name": name})
         self.display_name = profile["display_name"] or self.username
@@ -179,7 +212,7 @@ class AccountApp:
             self.say(f"{label}: {text}")
 
     def authenticate(self) -> bool:
-        self.say("Super Bot — sign in with your account on this server.")
+        self.say("Super Bot — sign in with your account on this device.")
         while True:
             try:
                 choice = self.ask("[L]ogin, [R]egister, re[C]over password, [Q]uit: ").strip().casefold()
@@ -296,6 +329,8 @@ class AccountApp:
             else:
                 self.client.set_display_name(argument)
                 self.say(f"Display name is now {self.client.display_name}.")
+        elif name == "/knowledge":
+            self._knowledge_command(argument)
         elif name == "/password":
             self.client.change_password(
                 self.ask_secret("Current password: "), self.ask_secret("New password: ")
@@ -314,6 +349,51 @@ class AccountApp:
         else:
             self.say("Unknown command. Type /help.")
         return None
+
+    def _knowledge_command(self, argument: str) -> None:
+        try:
+            parts = shlex.split(argument)
+        except ValueError as exc:
+            self.say(f"Error: invalid knowledge command: {exc}")
+            return
+        if not parts or parts == ["list"]:
+            sources = self.client.knowledge_sources()
+            if not sources:
+                self.say("No knowledge sources yet.")
+                return
+            for source in sources:
+                self.say(
+                    f"{source['id']:>4}  {source['title']}  "
+                    f"[{source['category']}] {source['source_url']}"
+                )
+            return
+        if parts[0] == "delete" and len(parts) == 2 and parts[1].isdigit():
+            self.client.delete_knowledge(int(parts[1]))
+            self.say("Knowledge source removed.")
+            return
+        if parts[0] == "add" and len(parts) in {2, 3}:
+            path = Path(parts[1]).expanduser()
+            if not path.is_file():
+                self.say(f"Error: not a file: {path}")
+                return
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                self.say(f"Error reading {path}: {exc}")
+                return
+            if len(content.encode("utf-8")) > 1_000_000:
+                self.say("Error: knowledge files must be at most 1 MiB.")
+                return
+            category = parts[2] if len(parts) == 3 else "general"
+            passages = self.client.add_knowledge(
+                source_url=path.resolve().as_uri(),
+                title=path.stem,
+                content=content,
+                category=category,
+            )
+            self.say(f"Indexed {passages} knowledge passage(s).")
+            return
+        self.say("Usage: /knowledge [list|add FILE [CATEGORY]|delete ID]")
 
     def confirm(self, question: str) -> bool:
         return self.ask(f"{question} [y/N] ").strip().casefold() == "y"
@@ -353,7 +433,7 @@ def main() -> int:
     parser.add_argument("--url", default=chat_app.DEFAULT_URL, help="server URL; discovered if omitted")
     parser.add_argument("--data-file", type=Path, default=chat_app.default_data_file(),
                         help="file next to which the trusted-servers list is kept")
-    parser.add_argument("--skip-tests", action="store_true", help="start without running the tests first")
+    parser.add_argument("--skip-tests", action="store_true", help="disable the optional SUPER_BOT_RUN_TESTS startup checks")
     args = parser.parse_args()
     if not preflight.ensure_tests_pass(args.skip_tests):
         return 1
@@ -364,6 +444,8 @@ def main() -> int:
         return AccountApp(AccountClient(server_url)).run()
     except KeyboardInterrupt:
         return 0
+    finally:
+        client_data.close_all()
 
 
 if __name__ == "__main__":

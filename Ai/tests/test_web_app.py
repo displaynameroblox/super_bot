@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from Ai import gateway, server, transport, web_app, web_client
+from Ai import client_data, gateway, knowledge, server, transport, web_app, web_client
 
 def remote_backend(http: TestClient):
     """Stands in for the encrypted transport: only gateway-allowed routes reach the server."""
@@ -34,8 +34,20 @@ class WebClientTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         for state in (server.chat_sessions, server.session_tokens, server.session_token_expiry):
             self.addCleanup(state.clear)
+        knowledge_path = Path(directory.name) / "knowledge" / "knowledge.db"
+        knowledge_patcher = patch.object(knowledge, "default_database_path", return_value=knowledge_path)
+        knowledge_patcher.start()
+        self.addCleanup(knowledge_patcher.stop)
         server.init_persistence(Path(directory.name) / "data" / "super_bot.db")
-        self.backend = remote_backend(TestClient(server.app))
+        raw = remote_backend(TestClient(server.app))
+        def send(url, method, path, body, token, *, timeout):
+            import asyncio
+            return asyncio.run(raw(method, path, body, token))
+        self.local = client_data.LocalClient(Path(directory.name) / "client", send)
+        async def backend(method, path, body, token):
+            import asyncio
+            return await asyncio.to_thread(self.local, "https://server", method, path, body, token or "")
+        self.backend = backend
         self.client = TestClient(
             web_app.build_web_app(self.backend, PORT),
             base_url=f"http://{HOST}",
@@ -162,6 +174,30 @@ class WebClientTests(unittest.TestCase):
         self.register()
         response = self.client.post("/api/profile", json={"model_settings": {"api_key": "x"}})
         self.assertEqual(response.status_code, 400)
+
+    def test_knowledge_sources_are_isolated_by_account(self) -> None:
+        self.register("alice")
+        alice_id = self.client.get("/api/me").json()["user_id"]
+        knowledge.add_document(
+            self.local.library(alice_id),
+            source_url="https://docs.example/alice",
+            title="Alice guide",
+            category="testing",
+            content="Alice-only knowledge.",
+        )
+
+        listed = self.client.get("/api/knowledge")
+        self.assertEqual([source["title"] for source in listed.json()["sources"]], ["Alice guide"])
+
+        bob = TestClient(
+            web_app.build_web_app(self.backend, PORT), base_url=f"http://{HOST}", headers=CSRF
+        )
+        self.register("bob", bob)
+        self.assertEqual(bob.get("/api/knowledge").json()["sources"], [])
+
+        source_id = listed.json()["sources"][0]["id"]
+        self.assertEqual(self.client.post("/api/knowledge/delete", json={"source_id": source_id}).status_code, 200)
+        self.assertEqual(self.client.get("/api/knowledge").json()["sources"], [])
 
 
 class ClientSideTests(unittest.TestCase):

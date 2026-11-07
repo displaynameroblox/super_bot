@@ -16,6 +16,8 @@ DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 DEFAULT_TIMEOUT_SECONDS = 600.0
 PHONE_PROVIDER = "phone"
 GEMINI_PROVIDER = "gemini"
+OPENAI_PROVIDER = "openai"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 load_dotenv(Path.cwd() / ".env")  # installed copies read the .env in the folder you run from
@@ -40,7 +42,7 @@ def _verify() -> ssl.SSLContext | bool:
 
 def plaintext_link_warning() -> str | None:
     provider = os.getenv("PHONE_MODEL_PROVIDER", PHONE_PROVIDER).strip().lower()
-    if provider == GEMINI_PROVIDER:
+    if provider in {GEMINI_PROVIDER, OPENAI_PROVIDER}:
         return None
     parsed_url = urlsplit(os.getenv("PHONE_MODEL_BASE_URL", "").strip())
     host = parsed_url.hostname
@@ -64,6 +66,9 @@ def provider_description() -> str:
     if provider == PHONE_PROVIDER:
         model = os.getenv("PHONE_MODEL_NAME", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         return f"Phone-hosted model ({model})"
+    if provider == OPENAI_PROVIDER:
+        _, _, model, _ = _openai_configuration()
+        return f"OpenAI cloud model ({model}); messages are sent to OpenAI"
     if provider == GEMINI_PROVIDER:
         if not os.getenv("GEMINI_API_KEY", "").strip():
             raise PhoneModelError(
@@ -74,7 +79,89 @@ def provider_description() -> str:
         if not model:
             raise PhoneModelError("GEMINI_MODEL_NAME cannot be empty.")
         return f"Google Gemini cloud model ({model}); messages are sent to Google"
-    raise PhoneModelError("PHONE_MODEL_PROVIDER must be 'phone' or 'gemini'.")
+    raise PhoneModelError("PHONE_MODEL_PROVIDER must be 'phone', 'gemini', or 'openai'.")
+
+
+def probe() -> None:
+    """Verify that the configured inference provider and model are available."""
+    provider = os.getenv("PHONE_MODEL_PROVIDER", PHONE_PROVIDER).strip().lower()
+    if provider == GEMINI_PROVIDER:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        model = os.getenv("GEMINI_MODEL_NAME", DEFAULT_GEMINI_MODEL).strip()
+        if not api_key:
+            raise PhoneModelError(
+                "Set GEMINI_API_KEY in the server's environment or .env file "
+                "to use the Gemini provider."
+            )
+        if not model:
+            raise PhoneModelError("GEMINI_MODEL_NAME cannot be empty.")
+        url = f"{GEMINI_API_URL}/{quote(model, safe='')}"
+        headers = {"x-goog-api-key": api_key}
+        name = "Gemini"
+    elif provider == OPENAI_PROVIDER:
+        base_url, api_key, model, timeout_seconds = _openai_configuration()
+        url = f"{base_url}/models/{quote(model, safe='')}"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        name = "OpenAI"
+    elif provider == PHONE_PROVIDER:
+        base_url, api_key, model, timeout_seconds = _configuration()
+        url = f"{base_url}/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        name = "Phone model"
+    else:
+        raise PhoneModelError("PHONE_MODEL_PROVIDER must be 'phone', 'gemini', or 'openai'.")
+
+    timeout = httpx.Timeout(
+        connect=10.0,
+        read=30.0 if provider == GEMINI_PROVIDER else min(timeout_seconds, 30.0),
+        write=10.0,
+        pool=10.0,
+    )
+    try:
+        with httpx.Client(
+            timeout=timeout, trust_env=False,
+            verify=True if provider == OPENAI_PROVIDER else _verify(),
+        ) as client:
+            response = client.get(url, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise PhoneModelError(f"{name} did not respond to its readiness check.") from exc
+    except httpx.HTTPError as exc:
+        raise PhoneModelError(f"Could not reach the {name.lower()} for its readiness check.") from exc
+
+    if response.status_code in {401, 403}:
+        key_name = {GEMINI_PROVIDER: "GEMINI_API_KEY", OPENAI_PROVIDER: "OPENAI_API_KEY",
+                    PHONE_PROVIDER: "TEST_PHONE_API_KEY"}[provider]
+        raise PhoneModelError(f"{name} rejected the API key; check {key_name}.")
+    if not response.is_success:
+        raise PhoneModelError(f"{name} readiness check returned HTTP {response.status_code}.")
+    if provider == PHONE_PROVIDER:
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise PhoneModelError("Phone model readiness check returned invalid JSON.") from exc
+        models = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(models, list) or not any(
+            isinstance(item, dict) and item.get("id") == model for item in models
+        ):
+            raise PhoneModelError(
+                f"Phone model readiness check did not list configured model {model!r}."
+            )
+
+
+def _openai_configuration() -> tuple[str, str, str, float]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("OPENAI_MODEL_NAME", "").strip()
+    if not api_key:
+        raise PhoneModelError("Set OPENAI_API_KEY in the server's environment or .env file.")
+    if not model:
+        raise PhoneModelError("Set OPENAI_MODEL_NAME to an OpenAI model available to your API key.")
+    try:
+        timeout = float(os.getenv("PHONE_MODEL_TIMEOUT_SECONDS", "600"))
+    except ValueError as exc:
+        raise PhoneModelError("PHONE_MODEL_TIMEOUT_SECONDS must be a number.") from exc
+    if not 10 <= timeout <= 1800:
+        raise PhoneModelError("PHONE_MODEL_TIMEOUT_SECONDS must be between 10 and 1800.")
+    return OPENAI_BASE_URL, api_key, model, timeout
 
 
 def _configuration() -> tuple[str, str, str, float]:
@@ -265,10 +352,15 @@ def chat(
     provider = os.getenv("PHONE_MODEL_PROVIDER", PHONE_PROVIDER).strip().lower()
     if provider == GEMINI_PROVIDER:
         return _gemini_chat(messages, response_schema, model)
-    if provider != PHONE_PROVIDER:
-        raise PhoneModelError("PHONE_MODEL_PROVIDER must be 'phone' or 'gemini'.")
+    if provider not in {PHONE_PROVIDER, OPENAI_PROVIDER}:
+        raise PhoneModelError("PHONE_MODEL_PROVIDER must be 'phone', 'gemini', or 'openai'.")
 
-    base_url, api_key, configured_model, timeout_seconds = _configuration()
+    is_openai = provider == OPENAI_PROVIDER
+    name = "OpenAI" if is_openai else "Phone model"
+    key_name = "OPENAI_API_KEY" if is_openai else "TEST_PHONE_API_KEY"
+    base_url, api_key, configured_model, timeout_seconds = (
+        _openai_configuration() if is_openai else _configuration()
+    )
     payload: dict[str, Any] = {
         "model": model or configured_model,
         "messages": messages,
@@ -276,6 +368,10 @@ def chat(
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
+    if is_openai:
+        payload.pop("chat_template_kwargs")
+        payload.pop("max_tokens")
+        payload["max_completion_tokens"] = 4096
     if response_schema is not None:
         payload["response_format"] = {
             "type": "json_schema",
@@ -292,7 +388,10 @@ def chat(
         pool=10.0,
     )
     try:
-        with httpx.Client(timeout=timeout, trust_env=False, verify=_verify()) as client:
+        with httpx.Client(
+            timeout=timeout, trust_env=False,
+            verify=True if provider == OPENAI_PROVIDER else _verify(),
+        ) as client:
             response = client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -300,36 +399,36 @@ def chat(
             )
     except httpx.TimeoutException as exc:
         raise PhoneModelError(
-            f"Phone model request timed out after {timeout_seconds:g} seconds."
+            f"{name} request timed out after {timeout_seconds:g} seconds."
         ) from exc
     except httpx.HTTPError as exc:
         raise PhoneModelError(
-            f"Could not reach the phone model at {base_url}: {exc}"
+            f"Could not reach {name} at {base_url}."
         ) from exc
 
     if response.status_code in {401, 403}:
         raise PhoneModelError(
-            "Phone model rejected the API key; check TEST_PHONE_API_KEY."
+            f"{name} rejected the API key; check {key_name}."
         )
     if not response.is_success:
-        detail = response.text.strip().replace("\n", " ")[:400]
+        detail = "" if is_openai else response.text.strip().replace("\n", " ")[:400]
         raise PhoneModelError(
-            f"Phone model returned HTTP {response.status_code}"
+            f"{name} returned HTTP {response.status_code}"
             f"{': ' + detail if detail else ''}."
         )
     try:
         result = response.json()
     except (ValueError, json.JSONDecodeError) as exc:
-        raise PhoneModelError("Phone model returned invalid JSON.") from exc
+        raise PhoneModelError(f"{name} returned invalid JSON.") from exc
     if not isinstance(result, dict):
-        raise PhoneModelError("Phone model returned an unexpected response.")
+        raise PhoneModelError(f"{name} returned an unexpected response.")
     choices = result.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise PhoneModelError("Phone model response did not contain a choice.")
+        raise PhoneModelError(f"{name} response did not contain a choice.")
     choice = choices[0]
     message = choice.get("message")
     if not isinstance(message, dict):
-        raise PhoneModelError("Phone model response did not contain a message.")
+        raise PhoneModelError(f"{name} response did not contain a message.")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         finish_reason = choice.get("finish_reason")
@@ -341,6 +440,6 @@ def chat(
         )
         finish_note = f" (finish_reason={finish_reason})" if finish_reason else ""
         raise PhoneModelError(
-            f"Phone model returned no visible reply{finish_note}{reasoning_note}."
+            f"{name} returned no visible reply{finish_note}{reasoning_note}."
         )
     return content.strip()

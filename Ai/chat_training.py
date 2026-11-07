@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import contextlib
 import os
 import sqlite3
 import stat
@@ -34,7 +35,7 @@ def save_exchange(database: Path, user_message: str, assistant_message: str) -> 
     if not database.exists():
         database.touch(mode=0o600)
     database.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    with sqlite3.connect(database) as connection:
+    with contextlib.closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS exchanges (
@@ -64,7 +65,7 @@ def export_exchanges(database: Path, output: Path) -> int:
     if not database.is_file():
         raise FileNotFoundError(f"No opt-in chat training database exists at {database}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
+    with contextlib.closing(sqlite3.connect(database)) as connection:
         rows = connection.execute(
             "SELECT messages_json FROM exchanges ORDER BY id"
         ).fetchall()

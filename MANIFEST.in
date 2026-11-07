@@ -4,3 +4,10 @@ recursive-include Ai/web *.html *.js *.css
 prune Ai/tests
 prune Ai/termux
 global-exclude .env *.pem *.db .DS_Store __pycache__ *.pyc
+
+include Ai/release-public.pem
+include docs/server-administration.md
+include docs/infrastructure-audit.md
+include docs/infrastructure-changelog.md
+
+recursive-include docs/releases *.md

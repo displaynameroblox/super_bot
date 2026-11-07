@@ -1,14 +1,15 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 
 MODEL_DIR="${MODEL_DIR:-$HOME/models}"
 CONFIG_DIR="$HOME/.config/superbot"
 API_KEY_FILE="$CONFIG_DIR/model-api-key"
 ACTIVE_MODEL_FILE="$CONFIG_DIR/active-model"
-PORT="${LLAMA_PORT:-8080}"
+MODEL_PORT="${LLAMA_PORT:-8080}"
 LLAMA_HOST="${LLAMA_HOST:-127.0.0.1}"
 SUPERBOT_DIR="${SUPERBOT_DIR:-$HOME/super_bot}"
-MAC_SERVER_URL="${MAC_SERVER_URL:-http://192.168.8.179:8765}"
+LAUNCHER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MAC_SERVER_URL="${MAC_SERVER_URL:-}"
 CONTEXT_SIZE="${LLAMA_CTX_SIZE:-2048}"
 THREADS="${LLAMA_THREADS:-4}"
 SERVER_MODEL_ALIAS="superbot-phone"
@@ -28,41 +29,83 @@ GEMMA_9B_REPO="bartowski/gemma-2-9b-it-GGUF"
 GEMMA_9B_FILE="gemma-2-9b-it-Q4_K_M.gguf"
 GEMMA_9B_BYTES=5761057728
 
+SUPERBOT_CHATTER_REPO="Displaynamethecat/super-bot_chatter-0.1"
+SUPERBOT_CHATTER_FILE="super-bot-gemma-2b.gguf"
+SUPERBOT_CHATTER_BYTES=5235213792
+LOCAL_MODEL_FEATURES_AVAILABLE=1
+PYTHON_BIN=""
+
 fail() {
     printf 'Error: %s\n' "$*" >&2
     exit 1
 }
 
-require_termux() {
-    command -v pkg >/dev/null 2>&1 || fail "Run this script inside Termux."
+is_termux() {
+    [[ "${PREFIX:-}" == "/data/data/com.termux/files/usr" ]]
+}
+
+prepare_runtime() {
+    if ! is_termux; then
+        local answer
+        printf '%s\n' \
+            'Warning: this script is designed for Termux and may be unstable on this system.' >&2
+        read -r -p "Download the files needed for local-model features? [y/N] " answer ||
+            answer=""
+        if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+            LOCAL_MODEL_FEATURES_AVAILABLE=0
+        fi
+        return
+    fi
 
     local -a packages=()
     command -v llama-server >/dev/null 2>&1 || packages+=(llama-cpp)
     command -v curl >/dev/null 2>&1 || packages+=(curl)
-    command -v wget >/dev/null 2>&1 || packages+=(wget)
     if ! stat -c '%s' /dev/null >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1; then
         packages+=(coreutils)
     fi
     if ((${#packages[@]})); then
-        pkg install -y "${packages[@]}"
+        if is_termux; then
+            pkg install -y "${packages[@]}"
+        else
+            fail "Missing required commands: ${packages[*]}. Install them, then run this script again."
+        fi
     fi
 
-    command -v llama-server >/dev/null 2>&1 || fail "llama-server is unavailable after installing llama-cpp."
-    command -v curl >/dev/null 2>&1 || fail "curl is unavailable after package installation."
-    command -v wget >/dev/null 2>&1 || fail "wget is unavailable after package installation."
+    command -v llama-server >/dev/null 2>&1 || fail "llama-server is unavailable."
+    command -v curl >/dev/null 2>&1 || fail "curl is unavailable."
     stat -c '%s' /dev/null >/dev/null 2>&1 || fail "GNU coreutils stat is unavailable."
-    command -v od >/dev/null 2>&1 || fail "od is unavailable after package installation."
+    command -v od >/dev/null 2>&1 || fail "od is unavailable."
+}
+
+require_local_model_features() {
+    if ((LOCAL_MODEL_FEATURES_AVAILABLE)); then
+        return 0
+    fi
+    printf '%s\n' \
+        'Local-model files were not downloaded, so this option is unavailable.' \
+        'Choose option 6 and select Gemini or OpenAI to start the secure cloud server.' >&2
+    return 1
+}
+
+find_python() {
+    if command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    else
+        return 1
+    fi
 }
 
 validate_runtime_settings() {
-    [[ "$PORT" =~ ^[0-9]+$ ]] && ((10#$PORT >= 1 && 10#$PORT <= 65535)) || fail \
+    [[ "$MODEL_PORT" =~ ^[0-9]+$ ]] && ((10#$MODEL_PORT >= 1 && 10#$MODEL_PORT <= 65535)) || fail \
         "LLAMA_PORT must be between 1 and 65535."
     [[ "$CONTEXT_SIZE" =~ ^[0-9]+$ ]] && ((10#$CONTEXT_SIZE >= 512 && 10#$CONTEXT_SIZE <= 32768)) || fail \
         "LLAMA_CTX_SIZE must be between 512 and 32768."
     [[ "$THREADS" =~ ^[0-9]+$ ]] && ((10#$THREADS >= 1 && 10#$THREADS <= 64)) || fail \
         "LLAMA_THREADS must be between 1 and 64."
 
-    PORT=$((10#$PORT))
+    MODEL_PORT=$((10#$MODEL_PORT))
     CONTEXT_SIZE=$((10#$CONTEXT_SIZE))
     THREADS=$((10#$THREADS))
 
@@ -275,13 +318,13 @@ download_model() {
     printf 'Installed %s.\n' "$filename"
 }
 
-download_trained_model() {
-    printf '\nExperimental locally trained model — still testing.\n'
+download_superbot_chatter() {
+    printf '\nDownloading Super Bot Chatter.\n'
     download_model \
-        "Displaynamethecat/gemma-2-2b-it-friendly-gguf" \
-        "gemma-2-2b-it.Q4_K_M.gguf" \
+        "$SUPERBOT_CHATTER_REPO" \
+        "$SUPERBOT_CHATTER_FILE" \
         main \
-        1708582560
+        "$SUPERBOT_CHATTER_BYTES"
 }
 
 download_menu() {
@@ -291,7 +334,7 @@ download_menu() {
     printf '  3) Gemma 1.1 7B instruct Q4_K_M (about 5.3 GB; needs roughly 7+ GB free RAM)\n'
     printf '  4) Gemma 2 9B instruct Q4_K_M (about 5.8 GB; best quality, tightest on RAM)\n'
     printf '  5) Other Hugging Face GGUF (enter repository and filename)\n'
-    printf '  6) Download experimental locally trained model from Hugging Face (still testing)\n'
+    printf '  6) Super Bot Chatter (about 5.2 GB)\n'
     printf '  0) Cancel\n'
     read -r -p "Choice: " choice || return 0
     case "$choice" in
@@ -318,7 +361,7 @@ download_menu() {
             download_model "$repo" "$filename" "$revision"
             ;;
         6)
-            download_trained_model
+            download_superbot_chatter
             ;;
         0|"")
             ;;
@@ -365,12 +408,13 @@ start_server() {
         tls_args=(--ssl-cert-file "$LLAMA_SSL_CERT" --ssl-key-file "$LLAMA_SSL_KEY")
     fi
 
-    cat <<EOF
+    if [[ "${1:-}" != supervised ]]; then
+        cat <<EOF
 
 Starting the local model API.
   Model:     $ACTIVE_MODEL
   API name:  $SERVER_MODEL_ALIAS
-  Base URL:  $scheme://$LLAMA_HOST:$PORT/v1
+  Base URL:  $scheme://$LLAMA_HOST:$MODEL_PORT/v1
   API key:   $(cat "$API_KEY_FILE")
   Key file:  $API_KEY_FILE
 
@@ -378,30 +422,39 @@ Listening on $LLAMA_HOST only. Use menu option 6 to expose the model through the
 Press Ctrl+C to stop the server and return to this menu.
 
 EOF
-    if [[ "$scheme" == "http" ]]; then
-        printf 'Note: this link is unencrypted. See README.md to enable HTTPS (LLAMA_SSL_CERT, LLAMA_SSL_KEY).\n\n'
+        if [[ "$scheme" == "http" ]]; then
+            printf 'Note: this link is unencrypted. See README.md to enable HTTPS (LLAMA_SSL_CERT, LLAMA_SSL_KEY).\n\n'
+        fi
     fi
-    if ! llama-server \
-        --model "$MODEL_DIR/$ACTIVE_MODEL" \
-        --alias "$SERVER_MODEL_ALIAS" \
-        --host "$LLAMA_HOST" \
-        --port "$PORT" \
-        --api-key-file "$API_KEY_FILE" \
-        --ctx-size "$CONTEXT_SIZE" \
-        --threads "$THREADS" \
-        --parallel 1 \
-        ${tls_args[@]+"${tls_args[@]}"}; then
+    local -a model_args=(
+        --model "$MODEL_DIR/$ACTIVE_MODEL"
+        --alias "$SERVER_MODEL_ALIAS"
+        --host "$LLAMA_HOST"
+        --port "$MODEL_PORT"
+        --api-key-file "$API_KEY_FILE"
+        --ctx-size "$CONTEXT_SIZE"
+        --threads "$THREADS"
+        --parallel 1
+        "${tls_args[@]}"
+    )
+    if [[ "${1:-}" == supervised ]]; then
+        exec llama-server "${model_args[@]}"
+    fi
+    if ! llama-server "${model_args[@]}"; then
         printf 'Model server stopped or failed to start. Check the message above.\n' >&2
         return 1
     fi
 }
 
-start_secure_stack() {
+start_secure_stack() (
     local provider_choice=1
     local gemini_api_key="${GEMINI_API_KEY:-}"
+    local openai_api_key="${OPENAI_API_KEY:-}"
+    local openai_model_name="${OPENAI_MODEL_NAME:-}"
     printf '\nChoose the AI model provider for this server:\n'
     printf '  1) Use the local model on this phone (default)\n'
     printf '  2) Use Google Gemini cloud (chat content is sent to Google)\n'
+    printf '  3) Use OpenAI cloud (chat content is sent to OpenAI)\n'
     if ! read -r -p "Choice [1]: " provider_choice || [[ -z "$provider_choice" ]]; then
         provider_choice=1
     fi
@@ -416,76 +469,122 @@ start_secure_stack() {
             fi
             [[ -n "$gemini_api_key" ]] || fail "A Gemini API key is required."
             ;;
-        *) fail "Choose 1 for the phone model or 2 for Gemini." ;;
+        3)
+            provider_choice=openai
+            if [[ -z "$openai_api_key" ]]; then
+                read -r -s -p "OpenAI API key (input hidden): " openai_api_key ||
+                    fail "Could not read the OpenAI API key."
+                printf '\n'
+            fi
+            [[ -n "$openai_api_key" ]] || fail "An OpenAI API key is required."
+            if [[ -z "$openai_model_name" ]]; then
+                read -r -p "OpenAI model ID: " openai_model_name || fail "Could not read the model ID."
+            fi
+            [[ -n "$openai_model_name" ]] || fail "An OpenAI model ID is required."
+            export OPENAI_API_KEY="$openai_api_key"
+            export OPENAI_MODEL_NAME="$openai_model_name"
+            ;;
+        *) fail "Choose 1 for the phone model, 2 for Gemini, or 3 for OpenAI." ;;
     esac
 
-    mkdir -p "$SUPERBOT_DIR/Ai"
-    printf 'Downloading Super Bot files from %s into %s/Ai...\n' "$MAC_SERVER_URL" "$SUPERBOT_DIR"
-    if ! wget \
-        --recursive \
-        --no-parent \
-        --no-host-directories \
-        --timestamping \
-        --reject 'index.html*' \
-        --directory-prefix "$SUPERBOT_DIR/Ai" \
-        "${MAC_SERVER_URL%/}/"; then
-        fail "Could not download the Ai folder. Start Ai/termux/serve-from-mac.sh on the Mac and check MAC_SERVER_URL."
-    fi
-    [[ -f "$SUPERBOT_DIR/Ai/server.py" && -f "$SUPERBOT_DIR/Ai/requirements.txt" ]] ||
-        fail "The download did not include Ai/server.py and Ai/requirements.txt; check that the Mac serves the Ai folder."
-    command -v python >/dev/null 2>&1 || pkg install -y python
-    pkg install -y python-cryptography
-    if ! python -c 'import fastapi, uvicorn, httpx, websockets, cryptography, pydantic_core' 2>/dev/null; then
-        if python -m pip install \
-            --only-binary=:all: \
-            --no-deps \
-            --index-url https://eutalix.github.io/android-pydantic-core/ \
-            pydantic-core; then
-            python -m pip install --only-binary=pydantic-core \
-                -r "$SUPERBOT_DIR/Ai/requirements.txt" ||
-                fail "Could not install the Super Bot Python requirements."
+    # Prefer the shared manager whenever the package is installed. The old signed
+    # launcher remains a compatibility path for installations not yet migrated.
+    if find_python && "$PYTHON_BIN" -c 'import Ai.manager_cli' 2>/dev/null; then
+        if [[ "$provider_choice" == phone ]]; then
+            export PHONE_MODEL_PROVIDER=phone
+            export PHONE_MODEL_BASE_URL="http://127.0.0.1:$MODEL_PORT/v1"
+            export TEST_PHONE_API_KEY="$(cat "$API_KEY_FILE")"
+            printf 'Start the local model with option 5 when inference is needed.\n'
         else
-            printf 'No compatible prebuilt pydantic-core wheel; installing Rust and the Termux maturin wheel to build it on this phone. This may take a while.\n'
-            pkg install -y rust || fail "Could not install Rust required to build pydantic-core."
-            python -m pip install \
-                --only-binary=maturin \
-                --extra-index-url https://termux-user-repository.github.io/pypi/ \
-                maturin ||
-                fail "Could not install the prebuilt Termux maturin build tool."
-            python -m pip install \
-                --no-build-isolation \
-                --no-binary=pydantic-core \
-                pydantic-core ||
-                fail "Could not build pydantic-core with Rust. Check the build output and available memory."
-            python -m pip install --only-binary=pydantic-core \
-                -r "$SUPERBOT_DIR/Ai/requirements.txt" ||
-                fail "Could not install the Super Bot Python requirements."
+            export PHONE_MODEL_PROVIDER="$provider_choice"
+            export GEMINI_API_KEY="$gemini_api_key"
+        fi
+        if [[ "${1:-start}" == update ]]; then
+            if [[ "${SUPER_BOT_OFFLINE:-0}" == 1 ]]; then
+                "$PYTHON_BIN" -m Ai.manager_cli update apply --offline || return
+            else
+                "$PYTHON_BIN" -m Ai.manager_cli update apply || return
+            fi
+        fi
+        "$PYTHON_BIN" -m Ai.manager_cli start --foreground
+        return
+    fi
+
+    local updater="$LAUNCHER_DIR/update-server.py"
+    local requirements="$LAUNCHER_DIR/requirements.txt"
+    local -a update_args=()
+    [[ -f "$requirements" ]] || requirements="$LAUNCHER_DIR/../requirements.txt"
+    [[ -f "$updater" ]] || fail "Copy the trusted update-server.py alongside this launcher."
+    local key="${SUPER_BOT_RELEASE_KEY:-$CONFIG_DIR/release-public.pem}"
+    if [[ -z "${SUPER_BOT_RELEASE_KEY:-}" && ! -f "$key" ]]; then
+        key="$LAUNCHER_DIR/release-public.pem"
+    fi
+    if [[ "${1:-start}" != update || "${SUPER_BOT_OFFLINE:-0}" == 1 ]]; then
+        printf 'Starting the installed server in offline mode.\n'
+    elif [[ -z "$MAC_SERVER_URL" ]]; then
+        fail "Use super-bot-manager update apply for official releases, or explicitly configure MAC_SERVER_URL for the legacy signed updater."
+    elif [[ -f "$key" ]]; then
+        update_args=(--url "$MAC_SERVER_URL" --key "$key")
+    else
+        fail "No trusted release key at $key. Download the public key over a trusted connection before updating."
+    fi
+    if ! find_python; then
+        if is_termux; then
+            pkg install -y python
+            find_python || fail "Python is required to start the secure server."
+        else
+            fail "Python is required to start the secure server."
         fi
     fi
-    python -c 'import fastapi, uvicorn, httpx, websockets, cryptography, pydantic_core' ||
+    if ((${#update_args[@]})) && ! command -v openssl >/dev/null 2>&1; then
+        if is_termux; then
+            pkg install -y openssl-tool || fail "Could not install OpenSSL."
+        else
+            fail "OpenSSL is required to verify releases."
+        fi
+    fi
+    if ! "$PYTHON_BIN" -c 'import argon2, cryptography, dotenv, fastapi, httpx, pydantic_core, uvicorn, websockets' 2>/dev/null; then
+        [[ -f "$requirements" ]] || fail "Copy the trusted requirements.txt alongside this launcher."
+        if is_termux; then
+            fail "Install the Super Bot wheel with install-wheel.sh first (see the Termux README)."
+        fi
+        "$PYTHON_BIN" -m pip install --only-binary=:all: -r "$requirements" ||
+            fail "Prebuilt server dependencies are unavailable for this Python."
+    fi
+    "$PYTHON_BIN" -c 'import argon2, cryptography, dotenv, fastapi, httpx, pydantic_core, uvicorn, websockets' ||
         fail "Python dependencies are still unavailable after installation."
     if [[ "$provider_choice" == phone ]]; then
-        LLAMA_HOST=127.0.0.1 start_server &
-        local model_pid=$!
-        trap "kill \"$model_pid\" 2>/dev/null || true" RETURN
-        sleep 3
-        printf 'Model is bound to 127.0.0.1 only; only the encrypted Super Bot port is reachable.\n'
-        (
-            cd "$SUPERBOT_DIR"
-            PHONE_MODEL_PROVIDER=phone \
-            PHONE_MODEL_BASE_URL="http://127.0.0.1:$PORT/v1" \
-            TEST_PHONE_API_KEY="$(cat "$API_KEY_FILE")" \
-            HOST=0.0.0.0 python -m Ai.server
-        )
+        local model_pid=""
+        local deadline
+        local -a model_probe=(curl --fail --silent --max-time 2
+            --header "Authorization: Bearer $(cat "$API_KEY_FILE")"
+            "http://127.0.0.1:$MODEL_PORT/v1/models")
+        if "${model_probe[@]}" >/dev/null; then
+            printf 'Reusing the existing local model API on 127.0.0.1:%s.\n' "$MODEL_PORT"
+        else
+            LLAMA_HOST=127.0.0.1 start_server supervised &
+            model_pid=$!
+            trap 'kill "$model_pid" 2>/dev/null || true; wait "$model_pid" 2>/dev/null || true' EXIT
+            deadline=$((SECONDS + 120))
+            until "${model_probe[@]}" >/dev/null; do
+                if ! kill -0 "$model_pid" 2>/dev/null || ((SECONDS >= deadline)); then
+                    printf 'The local model API did not become ready. Check the model server log.\n' >&2
+                    return 1
+                fi
+                sleep 1
+            done
+            printf 'Local model API is ready on 127.0.0.1:%s.\n' "$MODEL_PORT"
+        fi
+        export PHONE_MODEL_PROVIDER=phone
+        export PHONE_MODEL_BASE_URL="http://127.0.0.1:$MODEL_PORT/v1"
+        export TEST_PHONE_API_KEY="$(cat "$API_KEY_FILE")"
     else
-        (
-            cd "$SUPERBOT_DIR"
-            PHONE_MODEL_PROVIDER=gemini \
-            GEMINI_API_KEY="$gemini_api_key" \
-            HOST=0.0.0.0 python -m Ai.server
-        )
+        export PHONE_MODEL_PROVIDER="$provider_choice"
+        export GEMINI_API_KEY="$gemini_api_key"
     fi
-}
+    "$PYTHON_BIN" "$updater" \
+        --install "$SUPERBOT_DIR" "${update_args[@]}"
+)
 
 show_menu() {
     printf '\nSUPER BOT PHONE MODEL MANAGER\n'
@@ -494,20 +593,24 @@ show_menu() {
     printf '  3) Select active model\n'
     printf '  4) Delete an inactive model\n'
     printf '  5) Start the model API only (local)\n'
-    printf '  6) Download/update files and start the secure server (phone or Gemini)\n'
+    printf '  6) Start installed secure server (phone, Gemini, or OpenAI)\n'
+    printf '  7) Download a signed update and start the secure server\n'
     printf '  0) Exit\n'
     read -r -p "Choice: " choice || return 1
     case "$choice" in
-        1) list_models ;;
-        2) download_menu ;;
-        3) select_model ;;
+        1) require_local_model_features && list_models ;;
+        2) require_local_model_features && download_menu ;;
+        3) require_local_model_features && select_model ;;
         4)
-            list_models
-            read -r -p "Exact model filename to delete (blank to cancel): " filename || filename=""
-            [[ -n "$filename" ]] && remove_model "$filename"
+            if require_local_model_features; then
+                list_models
+                read -r -p "Exact model filename to delete (blank to cancel): " filename || filename=""
+                [[ -n "$filename" ]] && remove_model "$filename"
+            fi
             ;;
-        5) start_server ;;
-        6) start_secure_stack ;;
+        5) require_local_model_features && start_server ;;
+        6) start_secure_stack || printf 'Secure server exited or the update failed.\n' >&2 ;;
+        7) start_secure_stack update || printf 'Update or server startup failed.\n' >&2 ;;
         0) return 1 ;;
         *) printf 'Unknown choice.\n' ;;
     esac
@@ -518,30 +621,32 @@ main() {
     case "${1:-}" in
         --help|-h)
             printf 'Usage: bash start-server.sh [--list|--start|--download REPO FILE [REVISION]|--select FILE|--remove FILE]\n'
-            printf 'Set MAC_SERVER_URL to override the Mac download URL (default: %s).\n' "$MAC_SERVER_URL"
+            printf 'Use super-bot-manager for signed official releases; MAC_SERVER_URL is only for explicit legacy LAN updates.\n'
             printf 'Run without arguments for the interactive model manager.\n'
             return 0
     esac
 
-    require_termux
+    prepare_runtime
     initialize_config
     validate_runtime_settings
 
     case "${1:-}" in
         --list)
-            list_models
+            require_local_model_features && list_models
             return 0
             ;;
         --start)
-            start_server
+            require_local_model_features && start_server
             return
             ;;
         --download)
+            require_local_model_features || return 0
             (($# >= 3 && $# <= 4)) || fail "Use --download OWNER/REPO FILE.gguf [REVISION]."
             download_model "$2" "$3" "${4:-main}"
             return
             ;;
         --select)
+            require_local_model_features || return 0
             (($# == 2)) || fail "Use --select FILE.gguf."
             valid_model_filename "$2" || fail "Specify a simple .gguf filename."
             [[ -f "$MODEL_DIR/$2" ]] || fail "Model is not installed: $2"
@@ -551,6 +656,7 @@ main() {
             return 0
             ;;
         --remove)
+            require_local_model_features || return 0
             (($# == 2)) || fail "Use --remove FILE.gguf."
             remove_model "$2"
             return

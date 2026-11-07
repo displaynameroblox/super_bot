@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { mode: "login", user: null, sessionId: null, busy: false };
+const state = { mode: "login", user: null, sessionId: null, busy: false, selection: 0 };
 
 async function api(route, body, method = "POST") {
   const options = { method, headers: { "X-Super-Bot-Web": "1" }, credentials: "same-origin" };
@@ -39,6 +39,7 @@ function setMode(mode) {
 }
 
 function showAuth() {
+  state.selection++;
   state.user = null;
   state.sessionId = null;
   $("app-view").hidden = true;
@@ -50,6 +51,7 @@ function showAuth() {
 function showApp(user) {
   state.user = user;
   $("who").textContent = user.display_name || user.username;
+  $("account-id").textContent = "Account ID: " + user.user_id;
   $("auth-view").hidden = true;
   $("app-view").hidden = false;
   refreshChats();
@@ -58,7 +60,7 @@ function showApp(user) {
 async function boot() {
   try {
     const me = await api("me", null, "GET");
-    showApp({ username: me.username, display_name: me.profile.display_name });
+    showApp({ user_id: me.user_id, username: me.username, display_name: me.profile.display_name });
   } catch (_) {
     showAuth();
   }
@@ -83,7 +85,7 @@ $("auth-form").onsubmit = async (event) => {
     const body = { username, password };
     if (state.mode === "register") body.display_name = $("display-name").value.trim();
     const grant = await api(state.mode, body);
-    showApp({ username: grant.username, display_name: grant.display_name });
+    showApp({ user_id: grant.user_id, username: grant.username, display_name: grant.display_name });
   } catch (error) {
     say("auth-message", error.message);
   }
@@ -159,8 +161,10 @@ async function refreshChats() {
 }
 
 async function openChat(sessionId) {
+  const selection = ++state.selection;
   try {
     const chat = await api("chats/get", { session_id: sessionId });
+    if (selection !== state.selection) return;
     state.sessionId = sessionId;
     renderLog(chat.chat_log);
     setComposer(true);
@@ -170,9 +174,11 @@ async function openChat(sessionId) {
 }
 
 $("new-chat").onclick = async () => {
+  const selection = ++state.selection;
   say("chat-message", "Starting chat…", true);
   try {
     const session = await api("sessions", {});
+    if (selection !== state.selection) return;
     state.sessionId = session.session_ID;
     renderLog(session.Chat_log);
     setComposer(true);
@@ -192,9 +198,11 @@ $("send-form").onsubmit = async (event) => {
   $("message").value = "";
   addBubble(text, true);
   const waiting = addBubble("Thinking…", false, true);
+  const sessionId = state.sessionId;
+  const selection = state.selection;
   try {
-    const result = await api("send", { session_id: state.sessionId, message: text });
-    renderLog(result.Chat_log);
+    const result = await api("send", { session_id: sessionId, message: text });
+    if (sessionId === state.sessionId && selection === state.selection) renderLog(result.Chat_log);
     say("chat-message", "");
   } catch (error) {
     waiting.remove();
@@ -210,6 +218,44 @@ $("send-form").onsubmit = async (event) => {
 
 $("open-settings").onclick = () => { $("profile-name").value = state.user.display_name || ""; say("settings-message", ""); $("settings").showModal(); };
 $("close-settings").onclick = () => $("settings").close();
+
+async function refreshKnowledge() {
+  try {
+    const result = await api("knowledge", null, "GET");
+    const list = $("knowledge-list");
+    list.replaceChildren();
+    for (const source of result.sources) {
+      const item = document.createElement("li");
+      const text = document.createElement("span");
+      text.textContent = source.title + " (" + source.category + ")";
+      const remove = document.createElement("button");
+      remove.className = "remove";
+      remove.textContent = "Remove";
+      remove.onclick = async () => {
+        if (!confirm("Remove this knowledge source?")) return;
+        try {
+          await api("knowledge/delete", { source_id: source.id });
+          refreshKnowledge();
+        } catch (error) { say("knowledge-message", error.message); }
+      };
+      item.append(text, remove);
+      list.appendChild(item);
+    }
+    if (!result.sources.length) {
+      const item = document.createElement("li");
+      item.textContent = "No sources indexed for this account.";
+      list.appendChild(item);
+    }
+    say("knowledge-message", "");
+  } catch (error) {
+    say("knowledge-message", error.status === 401 ? "Your session ended. Please sign in again." : error.message);
+    if (error.status === 401) showAuth();
+  }
+}
+
+$("open-knowledge").onclick = () => { $("knowledge").showModal(); refreshKnowledge(); };
+$("close-knowledge").onclick = () => $("knowledge").close();
+$("refresh-knowledge").onclick = refreshKnowledge;
 
 $("profile-form").onsubmit = async (event) => {
   event.preventDefault();
@@ -259,3 +305,9 @@ $("delete-form").onsubmit = async (event) => {
 
 setMode("login");
 boot();
+
+// Release temporary server sessions when this browser document leaves.
+window.addEventListener("pagehide", () => {
+  fetch("/api/leave", { method: "POST", credentials: "same-origin", keepalive: true,
+    headers: { "X-Super-Bot-Web": "1", "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
+});

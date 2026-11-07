@@ -9,7 +9,7 @@
 <body>
   <main id="auth-view" class="card" hidden>
     <h1>Super Bot</h1>
-    <p class="muted">Your account lives on this computer. Nothing is sent to a cloud service.</p>
+    <p class="muted">Your account and saved chats stay on this computer. The selected AI provider receives working context.</p>
     <div class="tabs">
       <button type="button" id="tab-login" class="tab active">Sign in</button>
       <button type="button" id="tab-register" class="tab">Create account</button>
@@ -31,6 +31,7 @@
       <div class="sidebar-head">
         <strong id="who"></strong>
         <button type="button" id="open-settings" class="link">Account</button>
+        <button type="button" id="open-knowledge" class="link">Knowledge</button>
       </div>
       <button type="button" id="new-chat">+ New chat</button>
       <input id="search" type="search" placeholder="Search chats" aria-label="Search chats">
@@ -48,6 +49,7 @@
 
   <dialog id="settings">
     <h2>Account</h2>
+    <p id="account-id" class="muted"></p>
     <form id="profile-form">
       <label>Display name <input id="profile-name" maxlength="64"></label>
       <button type="submit">Save profile</button>
@@ -72,6 +74,14 @@
     </form>
     <p id="settings-message" class="message" role="alert"></p>
     <button type="button" id="close-settings" class="link">Close</button>
+  </dialog>
+  <dialog id="knowledge">
+    <h2>Knowledge library</h2>
+    <p class="muted">Sources in this library are available only to this account.</p>
+    <ul id="knowledge-list"></ul>
+    <p id="knowledge-message" class="message" role="alert"></p>
+    <button type="button" id="refresh-knowledge">Refresh</button>
+    <button type="button" id="close-knowledge" class="link">Close</button>
   </dialog>
   <script src="/app.js"></script>
 </body>

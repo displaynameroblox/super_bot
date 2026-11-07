@@ -403,7 +403,7 @@ class EncryptedEventTests(GatewayTestCase):
 
         self.assertEqual(closed.exception.code, 1008)
 
-    def test_disconnected_clients_are_removed_from_the_event_manager(self) -> None:
+    def test_event_disconnect_preserves_chat_until_explicit_leave(self) -> None:
         grant = self.start_session()
         session_id = grant["session_ID"]
 
@@ -415,6 +415,19 @@ class EncryptedEventTests(GatewayTestCase):
         # Closing the client lets the server loop see the disconnect.
         self.client.get("/health")
         self.assertNotIn(session_id, server.event_manager.connections)
+        token = grant["access_token"]
+        with self.client.websocket_connect("/e2ee/events") as websocket:
+            self.open_events(websocket, session_id, token)
+            websocket.receive_bytes()
+
+        status, body = self.call(
+            "POST", "/chat", {"ses_id": session_id, "msg": "Still here?"}, token
+        )
+        self.assertEqual(status, 200, body)
+        status, body = self.call("POST", "/sessions/leave", {"session_id": session_id}, token)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn(session_id, server.chat_sessions)
+
 
 
 if __name__ == "__main__":

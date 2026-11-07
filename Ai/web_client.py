@@ -19,9 +19,10 @@ from typing import Any
 import uvicorn
 
 try:
-    from . import account_app, chat_app, preflight, web_app
+    from . import account_app, client_data, chat_app, preflight, web_app
     from . import transport
 except ImportError:
+    from Ai import client_data
     import account_app
     import chat_app
     import preflight
@@ -34,7 +35,7 @@ REQUEST_TIMEOUT = 500
 
 def make_backend(server_url: str, requester=None):
     """Forward browser calls to the server through the encrypted transport."""
-    send = requester or transport.secure_request
+    send = requester or client_data.request
 
     async def backend(method: str, path: str, body: Any, bearer: str | None) -> tuple[int, Any]:
         try:
@@ -54,7 +55,7 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
     parser.add_argument("--data-file", type=Path, default=chat_app.default_data_file(),
                         help="file next to which the trusted-servers list is kept")
-    parser.add_argument("--skip-tests", action="store_true", help="start without running the tests first")
+    parser.add_argument("--skip-tests", action="store_true", help="disable the optional SUPER_BOT_RUN_TESTS startup checks")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         print("--port must be between 1 and 65535", file=sys.stderr)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import contextlib
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -23,8 +24,20 @@ def default_database_path() -> Path:
     return root / "super_bot" / "knowledge" / "knowledge.db"
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def user_database_path(user_id: int) -> Path:
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1:
+        raise ValueError("User ID must be a positive integer.")
+    root = default_database_path().parent / "users"
+    return root / f"{user_id}.db"
+
+
+@contextlib.contextmanager
+def _connect(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.touch(mode=0o600)
+    if os.name != "nt":
+        path.chmod(0o600)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -51,9 +64,17 @@ def _connect(path: Path) -> sqlite3.Connection:
             content,
             tokenize = 'unicode61'
         );
+        CREATE TRIGGER IF NOT EXISTS passages_delete_fts AFTER DELETE ON passages BEGIN
+            DELETE FROM passages_fts WHERE rowid = old.id;
+        END;
+        DELETE FROM passages_fts WHERE rowid NOT IN (SELECT id FROM passages);
         """
     )
-    return connection
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def split_passages(text: str, *, size: int = 900, overlap: int = 120) -> list[str]:
@@ -151,6 +172,53 @@ class KnowledgeHit:
     source_url: str
     category: str
     content: str
+
+
+@dataclass(frozen=True)
+class KnowledgeSource:
+    id: int
+    title: str
+    source_url: str
+    category: str
+    author: str
+    published_at: str
+    license: str
+    updated_at: str
+
+
+def list_sources(database: Path) -> list[KnowledgeSource]:
+    if not database.exists():
+        return []
+    with _connect(database) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, title, source_url, category, author, published_at, license, updated_at
+            FROM sources
+            ORDER BY updated_at DESC, id DESC
+            """
+        ).fetchall()
+    return [
+        KnowledgeSource(
+            id=row["id"],
+            title=row["title"],
+            source_url=row["source_url"],
+            category=row["category"],
+            author=row["author"],
+            published_at=row["published_at"],
+            license=row["license"],
+            updated_at=row["updated_at"],
+        )
+        for row in rows
+    ]
+
+
+def delete_source(database: Path, source_id: int) -> bool:
+    if isinstance(source_id, bool) or not isinstance(source_id, int) or source_id < 1:
+        raise ValueError("Source ID must be a positive integer.")
+    if not database.exists():
+        return False
+    with _connect(database) as connection:
+        return connection.execute("DELETE FROM sources WHERE id = ?", (source_id,)).rowcount > 0
 
 
 def search(database: Path, query: str, *, limit: int = 4) -> list[KnowledgeHit]:

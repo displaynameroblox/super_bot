@@ -47,7 +47,7 @@ class ChatTrainingTests(unittest.TestCase):
                 chat_training.export_exchanges(database, output)
             chat_training.save_exchange(database, "Hi", "Hello")
             with patch("sqlite3.connect") as connection:
-                connection.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+                connection.return_value.execute.return_value.fetchall.return_value = []
                 with self.assertRaisesRegex(ValueError, "No chat exchanges"):
                     chat_training.export_exchanges(database, output)
 

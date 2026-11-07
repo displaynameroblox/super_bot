@@ -28,6 +28,42 @@ class PhoneModelTests(unittest.TestCase):
 
         self.assertEqual(phone_model._configuration()[2], "superbot-phone")
 
+    def test_phone_probe_requires_the_configured_model(self) -> None:
+        response = Mock()
+        response.status_code = 200
+        response.is_success = True
+        response.json.return_value = {"data": [{"id": "test-model"}]}
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.get.return_value = response
+
+        with patch("Ai.phone_model.httpx.Client", return_value=client):
+            phone_model.probe()
+
+        self.assertEqual(
+            client.get.call_args.args[0],
+            "http://192.168.1.42:8080/v1/models",
+        )
+        self.assertEqual(
+            client.get.call_args.kwargs["headers"]["Authorization"],
+            "Bearer test-key",
+        )
+
+    def test_phone_probe_rejects_an_unavailable_model(self) -> None:
+        response = Mock()
+        response.status_code = 200
+        response.is_success = True
+        response.json.return_value = {"data": [{"id": "other-model"}]}
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.get.return_value = response
+
+        with patch("Ai.phone_model.httpx.Client", return_value=client):
+            with self.assertRaisesRegex(phone_model.PhoneModelError, "test-model"):
+                phone_model.probe()
+
     def test_chat_sends_bearer_auth_history_and_json_schema(self) -> None:
         response = Mock()
         response.status_code = 200

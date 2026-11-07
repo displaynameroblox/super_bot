@@ -1,11 +1,12 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from Ai import account_app, gateway, server
+from Ai import account_app, client_data, gateway, server
 
 
 def gateway_requester(client: TestClient):
@@ -56,11 +57,12 @@ class AccountAppTests(unittest.TestCase):
         reply.start()
         self.addCleanup(reply.stop)
         self.http = TestClient(server.app)
+        self.local = client_data.LocalClient(Path(directory.name) / "client", gateway_requester(self.http))
 
     def app(self, answers: list[str], secrets: list[str] | None = None) -> tuple[account_app.AccountApp, Script]:
         script = Script(answers)
         secret = Script(secrets or [])
-        client = account_app.AccountClient("https://127.0.0.1:1", gateway_requester(self.http))
+        client = account_app.AccountClient("https://127.0.0.1:1", self.local)
         return account_app.AccountApp(
             client, ask=script.ask, ask_secret=secret.ask, say=script.say
         ), script
@@ -151,6 +153,34 @@ class AccountAppTests(unittest.TestCase):
         self.assertEqual(
             account_app.parse_log(log), [("Al", "first\nsecond line"), ("AI", "reply")]
         )
+
+    def test_knowledge_files_are_private_to_the_signed_in_account(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"SUPER_BOT_KNOWLEDGE_DB": str(Path(directory) / "knowledge.db")},
+        ):
+            source = Path(directory) / "notes.txt"
+            source.write_text("Alice's private project notes.", encoding="utf-8")
+            alice, alice_script = self.app(
+                ["r", "alice", "", f'/knowledge add "{source}" project', "/knowledge", "/quit"],
+                ["password-one", "password-one"],
+            )
+            self.assertEqual(alice.run(), 0)
+            self.assertIn("Indexed 1 knowledge passage(s).", alice_script.text)
+            self.assertIn("notes", alice_script.text)
+
+            bob, bob_script = self.app(
+                ["r", "bob", "", "/knowledge", "/quit"],
+                ["password-two", "password-two"],
+            )
+            self.assertEqual(bob.run(), 0)
+            self.assertIn("No knowledge sources yet.", bob_script.text)
+
+            alice_sources = server.knowledge.list_sources(self.local.library(1))
+            self.assertEqual(len(alice_sources), 1)
+            self.assertEqual(
+                server.knowledge.list_sources(self.local.library(2)), []
+            )
 
 
 if __name__ == "__main__":

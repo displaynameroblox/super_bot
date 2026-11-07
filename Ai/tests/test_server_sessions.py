@@ -96,16 +96,16 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_passwordless_generated_session_broadcasts_shared_chat_updates(self) -> None:
         grant = await self._create_session()
-        self.assertEqual(grant.session_ID, 1)
-        self.assertIsNone(server.session_passwords[1])
+        self.assertGreater(grant.session_ID, 0)
+        self.assertIsNone(server.session_passwords[grant.session_ID])
         self.assertEqual(
-            server.session_hosts[1],
+            server.session_hosts[grant.session_ID],
             hashlib.sha256(grant.access_token.encode("ascii")).digest(),
         )
 
-        login_grant = server.login(server.LoginRequest(session_ID=1))
+        login_grant = server.login(server.LoginRequest(session_ID=grant.session_ID))
         websocket = FakeWebSocket()
-        server.event_manager.connections[1] = {websocket}  # type: ignore[assignment]
+        server.event_manager.connections[grant.session_ID] = {websocket}  # type: ignore[assignment]
 
         with (
             patch.object(
@@ -119,7 +119,7 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await server.chat(
                 server.Chatreg(
-                    ses_id=1,
+                    ses_id=grant.session_ID,
                     msg="Please help",
                     coding_context="Use the Roblox skill.",
                 ),
@@ -173,18 +173,7 @@ class SessionServerTests(unittest.IsolatedAsyncioTestCase):
                     authorization=f"Bearer {grant.access_token}",
                 )
 
-            with sqlite3.connect(database) as connection:
-                rows = connection.execute(
-                    "SELECT messages_json FROM exchanges"
-                ).fetchall()
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(
-                json.loads(rows[0][0]),
-                [
-                    {"role": "user", "content": "Please keep answers brief."},
-                    {"role": "assistant", "content": "I will keep answers brief."},
-                ],
-            )
+            self.assertFalse(database.exists(), "The server must never retain training exchanges")
 
     async def test_progress_is_visible_to_creator_and_opted_in_sender_only(self) -> None:
         creator = await self._create_session()

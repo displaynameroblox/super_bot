@@ -12,10 +12,12 @@ import asyncio
 import base64
 import contextlib
 import logging
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,15 +36,17 @@ ALLOWED_ROUTES = (
     ("POST", re.compile(r"/chat")),
     ("POST", re.compile(r"/style")),
     ("POST", re.compile(r"/skills")),
+    ("POST", re.compile(r"/sessions/leave")),
     ("GET", re.compile(r"/chat/[0-9]{1,18}")),
     (
         "POST",
         re.compile(
             r"/accounts/(register|login|logout|logout_all|password|delete|recovery_code"
-            r"|recover|profile|chats|chats/get|chats/open|chats/delete)"
+            r"|recover|profile|chats|chats/get|chats/open|chats/delete|knowledge"
+            r"|knowledge/add|knowledge/delete)"
         ),
     ),
-    ("GET", re.compile(r"/accounts/me")),
+    ("GET", re.compile(r"/accounts/(me|knowledge)")),
 )
 EVENTS_PATH = re.compile(r"/events/([0-9]{1,18})")
 HELLO_TIMEOUT_SECONDS = 10
@@ -161,6 +165,9 @@ class EncryptedEventSocket:
                 raise RuntimeError("The encrypted event stream is not open")
             await self._websocket.send_bytes(self._encryptor.seal(event))
 
+    async def close(self, code: int = 1000) -> None:
+        await self._websocket.close(code=code)
+
     async def receive_text(self) -> str:
         while True:
             message = await self._websocket.receive()
@@ -177,12 +184,19 @@ def build_gateway(
     replay_cache: e2ee.ReplayCache | None = None,
     clock: Callable[[], float] = time.time,
 ) -> FastAPI:
-    gateway = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    gateway = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=inner_app.router.lifespan_context)
     replays = replay_cache or e2ee.ReplayCache()
     public_key = base64.urlsafe_b64encode(identity.public_key).decode("ascii")
 
+    build_marker = Path(__file__).with_name(".release-build")
+    build = build_marker.read_text(encoding="ascii").strip() if build_marker.is_file() else ""
+    build = os.getenv("SUPER_BOT_RELEASE_BUILD", build)
+    startup_id = os.getenv("SUPER_BOT_STARTUP_ID", "")
+
     @gateway.get("/health")
     def health() -> dict[str, str]:
+        if build and startup_id:
+            return {"status": "ok", "build": build, "startup_id": startup_id}
         return {"status": "ok"}
 
     @gateway.get(E2EE_IDENTITY_PATH)

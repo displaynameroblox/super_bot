@@ -77,7 +77,8 @@ class KnowledgeLibraryTests(unittest.TestCase):
                 return_value='{"reply":"FTS5 is full-text search.","is_coding_request":false}',
             ) as chat,
         ):
-            server.generate_reply(session, "", current_message="How does SQLite FTS5 rank results?")
+            server.generate_reply(session, "", current_message="How does SQLite FTS5 rank results?",
+                                  knowledge_context=knowledge.format_context(knowledge.search(self.database, "SQLite FTS5")))
 
         system_prompt = chat.call_args.args[0][0]["content"]
         self.assertIn("SQLite FTS5 supports full-text search", system_prompt)
@@ -118,13 +119,49 @@ class KnowledgeLibraryTests(unittest.TestCase):
         commands = (
             ["train", "--data-dir", self.temp_dir.name],
             ["download", "--repo", "owner/model", "--filename", "model.gguf"],
+            ["download-superbot"],
             ["serve"],
+            ["serve-superbot"],
             ["index", "--file", "source.txt", "--category", "general"],
         )
         for command_args in commands:
             with self.subTest(command=command_args[0]):
                 args = parser.parse_args(command_args)
                 self.assertEqual(args.command, command_args[0])
+
+    def test_superbot_server_uses_its_base_model_and_adapter(self) -> None:
+        args = local_manager.build_parser().parse_args(["serve-superbot"])
+
+        with patch.object(local_manager, "serve_model") as serve:
+            args.handler(args)
+
+        configured = serve.call_args.args[0]
+        self.assertEqual(configured.backend, "mlx")
+        self.assertEqual(configured.model, "google/gemma-2-2b-it")
+        self.assertEqual(
+            configured.adapter_dir,
+            local_manager.data_directory() / "adapters" / "super-bot_chatter-0.1",
+        )
+
+    def test_index_database_selects_a_private_account_library(self) -> None:
+        with patch.object(knowledge, "default_database_path", return_value=self.database):
+            args = local_manager.build_parser().parse_args(
+                [
+                    "index",
+                    "--file",
+                    "source.txt",
+                    "--category",
+                    "general",
+                    "--account-id",
+                    "7",
+                    "--server-url",
+                    "https://server",
+                ]
+            )
+            self.assertEqual(
+                local_manager.index_database(args),
+                __import__("Ai.client_data", fromlist=["directory_for_url"]).directory_for_url("https://server") / "knowledge" / "7.db",
+            )
 
 
 if __name__ == "__main__":

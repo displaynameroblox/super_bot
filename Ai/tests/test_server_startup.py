@@ -56,6 +56,7 @@ class StartServerTests(unittest.TestCase):
             patch.object(server.uvicorn, "run") as run,
             patch.object(server, "socket") as socket_module,
             patch.object(server, "threading") as threading_module,
+            patch.object(server.phone_model, "probe"),
             contextlib.redirect_stdout(output),
         ):
             server.start_server()
@@ -67,6 +68,8 @@ class StartServerTests(unittest.TestCase):
         run.assert_called_once()
         app = run.call_args.args[0]
         options = run.call_args.kwargs
+        self.assertIn("ws_ping_timeout", options)
+        self.assertIsNone(options["ws_ping_timeout"])
         self.assertEqual((options["host"], options["port"]), ("127.0.0.1", 8443))
         self.assertTrue(Path(options["ssl_certfile"]).is_file())
         self.assertTrue(Path(options["ssl_keyfile"]).is_file())
@@ -176,7 +179,7 @@ class StartServerTests(unittest.TestCase):
                 server.start_server()
         run.assert_not_called()
 
-    def test_sessions_are_durable_across_a_server_restart(self) -> None:
+    def test_server_restart_forgets_temporary_sessions(self) -> None:
         self.start()
         self.assertIsNotNone(server.store)
         server.chat_sessions.clear()
@@ -188,8 +191,8 @@ class StartServerTests(unittest.TestCase):
         server.chat_sessions.clear()
         server.session_tokens.clear()
         self.start()  # a fresh start reloads everything from SQLite
-        self.assertEqual(server.chat_sessions[41].Chat_log, "hello")
-        self.assertEqual(server.authorized_session_id(f"Bearer {token}"), 41)
+        self.assertNotIn(41, server.chat_sessions)
+        self.assertIsNone(server.authorized_session_id(f"Bearer {token}"))
 
     def test_a_plain_http_phone_link_is_called_out(self) -> None:
         _, _, _, banner = self.start(PHONE_MODEL_BASE_URL="http://192.168.1.42:8080/v1")
@@ -218,6 +221,24 @@ class StartServerTests(unittest.TestCase):
         self.assertIn("Google Gemini cloud model", banner)
         self.assertIn("messages are sent to Google", banner)
         self.assertNotIn("Warning:", banner)
+
+    def test_model_network_probe_is_opt_in(self) -> None:
+        with (
+            patch.dict(os.environ, {**self.environment, "SUPER_BOT_REQUIRE_MODEL_ON_START": "0"}),
+            patch.object(server.phone_model, "probe", side_effect=RuntimeError("offline")) as probe,
+            patch.object(server.uvicorn, "run"),
+            patch.object(server, "socket"),
+            patch.object(server, "threading"),
+        ):
+            server.start_server()
+        probe.assert_not_called()
+        with (
+            patch.dict(os.environ, {**self.environment, "SUPER_BOT_REQUIRE_MODEL_ON_START": "1"}),
+            patch.object(server.phone_model, "probe", side_effect=RuntimeError("offline")),
+            patch.object(server, "ensure_port_available"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                server.start_server()
 
     def test_invalid_ports_are_still_rejected(self) -> None:
         with (
@@ -255,22 +276,22 @@ class PlainEventRouteTests(unittest.TestCase):
             grant = client.post(
                 "/start_ses", json={"AI_persona": "p", "plr_name": "n"}
             ).json()
-        header = f"Bearer {grant['access_token']}"
+            header = f"Bearer {grant['access_token']}"
 
-        self.assertIsNone(server.event_access_error(grant["session_ID"], header))
-        self.assertEqual(
-            server.event_access_error(grant["session_ID"], None),
-            (401, "Valid session login required"),
-        )
-        self.assertEqual(
-            server.event_access_error(grant["session_ID"] + 1, header),
-            (401, "Valid session login required"),
-        )
-        server.chat_sessions.clear()
-        self.assertEqual(
-            server.event_access_error(grant["session_ID"], header),
-            (404, "Chat session not found"),
-        )
+            self.assertIsNone(server.event_access_error(grant["session_ID"], header))
+            self.assertEqual(
+                server.event_access_error(grant["session_ID"], None),
+                (401, "Valid session login required"),
+            )
+            self.assertEqual(
+                server.event_access_error(grant["session_ID"] + 1, header),
+                (401, "Valid session login required"),
+            )
+            server.chat_sessions.clear()
+            self.assertEqual(
+                server.event_access_error(grant["session_ID"], header),
+                (404, "Chat session not found"),
+            )
 
     def test_a_client_that_drops_during_the_handshake_is_not_registered(self) -> None:
         with TestClient(server.app) as client:

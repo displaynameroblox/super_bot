@@ -23,14 +23,17 @@ from Ai.chat_app import (
     ProfileStore,
     ProgressUpdate,
     ServerError,
+    SetupState,
     UIPreferences,
     load_ui_preferences,
+    load_setup_state,
     normalize_server_url,
     request_json,
     load_profiles,
     load_sessions,
     save_profiles,
     save_sessions,
+    save_setup_state,
     save_ui_preferences,
 )
 
@@ -42,7 +45,7 @@ class CodingToolsTests(unittest.TestCase):
         app.base_url = "http://localhost"
         app.executor = Mock()
         app.executor.submit.return_value = Future()
-        app._prompt = Mock(side_effect=["23", "secret"])
+        app._login_form = Mock(return_value=("23", "secret"))
         app._wait_for_startup_request = Mock(
             side_effect=lambda: (
                 setattr(
@@ -64,11 +67,7 @@ class CodingToolsTests(unittest.TestCase):
         )
 
         self.assertTrue(app._startup_login())
-        self.assertEqual(app._prompt.call_args_list[0].kwargs, {"title": "LOGIN"})
-        self.assertEqual(
-            app._prompt.call_args_list[1].kwargs,
-            {"secret": True, "title": "LOGIN"},
-        )
+        app._login_form.assert_called_once_with()
         app.executor.submit.assert_called_once_with(
             ANY,
             "http://localhost",
@@ -190,13 +189,71 @@ class CodingToolsTests(unittest.TestCase):
         app.action_menu_visible = False
 
         app.handle_key("\t")
-        self.assertEqual(app.active_tab, "Activity")
+        self.assertEqual(app.active_tab, "Data")
         app.handle_key(curses.KEY_LEFT)
         self.assertEqual(app.active_tab, "Chat")
         app.handle_key(curses.KEY_F0 + 4)
-        self.assertEqual(app.active_tab, "Coding")
+        self.assertEqual(app.active_tab, "Activity")
         app.handle_key(curses.KEY_F0 + 5)
+        self.assertEqual(app.active_tab, "Coding")
+        app.handle_key(curses.KEY_F0 + 6)
         self.assertEqual(app.active_tab, "Review")
+
+    def test_account_login_keeps_knowledge_token_in_memory(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.future = Future()
+        app.future.set_result(
+            {
+                "access_token": "memory-only-token",
+                "display_name": "Alex",
+            }
+        )
+        app.pending_kind = "account_login"
+        app.account_access_token = ""
+        app.account_display_name = ""
+        app.knowledge_sources = []
+        app.scroll_offset = 1
+        app.status = ""
+
+        app._finish_pending_request()
+
+        self.assertEqual(app.account_access_token, "memory-only-token")
+        self.assertEqual(app.account_display_name, "Alex")
+        self.assertIn("Signed in as Alex", app.status)
+
+    def test_server_picker_accepts_a_connect_command(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.screen = Mock()
+        app.screen.getmaxyx.return_value = (24, 80)
+        app.screen.get_wch.side_effect = ["/", "\n"]
+        app._put = Mock()
+        app._color = Mock(return_value=0)
+        app._prompt = Mock(return_value="/connect 127.0.0.1:8000")
+
+        self.assertEqual(app._choose_discovered_server([]), "https://127.0.0.1:8000")
+
+    def test_server_picker_separates_discovery_from_manual_address_entry(self) -> None:
+        app = ChatApp.__new__(ChatApp)
+        app.screen = Mock()
+        app.screen.getmaxyx.return_value = (24, 80)
+        app.screen.get_wch.side_effect = [curses.KEY_DOWN, "\n"]
+        app._put = Mock()
+        app._color = Mock(return_value=0)
+
+        self.assertEqual(
+            app._choose_discovered_server(["https://192.168.1.20:8000"]),
+            "",
+        )
+        self.assertTrue(
+            any(
+                "DISCOVERED SERVERS" in str(call.args)
+                for call in app._put.call_args_list
+            )
+        )
+        self.assertTrue(
+            any("Manual address" in str(call.args) for call in app._put.call_args_list)
+        )
+        app.screen.timeout.assert_called_with(100)
 
     def test_view_command_selects_each_tab_and_split(self) -> None:
         app = ChatApp.__new__(ChatApp)
@@ -208,6 +265,7 @@ class CodingToolsTests(unittest.TestCase):
         app.pending_message = ""
 
         for view, expected_tab in (
+            ("data", "Data"),
             ("activity", "Activity"),
             ("coding", "Coding"),
             ("review", "Review"),
@@ -989,19 +1047,77 @@ class CodingToolsTests(unittest.TestCase):
             store = load_profiles(path)
         self.assertEqual(store.profiles["Old"].chat_log, "")
 
+    def test_rich_profile_and_setup_state_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profiles_path = root / "chat_profiles.json"
+            setup_path = root / "setup_state.json"
+            store = ProfileStore(
+                profiles={
+                    "Alex": ChatProfile(
+                        player_name="Alex",
+                        persona="Friendly helper",
+                        style="casual",
+                        chat_skills={"tutor": "Teach patiently."},
+                        preferred_model="Super Bot Chatter",
+                        character_development_enabled=True,
+                        character_notes="Keep a warm tone.",
+                    )
+                },
+                selected="Alex",
+            )
+            state = SetupState(completed=True, preferred_model="Super Bot Chatter")
+
+            save_profiles(profiles_path, store)
+            save_setup_state(setup_path, state)
+
+            self.assertEqual(load_profiles(profiles_path), store)
+            self.assertEqual(load_setup_state(setup_path), state)
+
+    def test_saving_profile_preserves_base_persona_after_character_context(self) -> None:
+        profile = ChatProfile(
+            player_name="Alex",
+            persona="Friendly helper",
+            character_development_enabled=True,
+            character_notes="Keep a warm tone.",
+        )
+        app = ChatApp.__new__(ChatApp)
+        app.sessions = [
+            ChatSession(
+                local_id="test",
+                player_name="Alex",
+                persona=app._profile_persona(profile),
+                chat_log="",
+                server_session_id=1,
+                profile_name="Alex",
+            )
+        ]
+        app.active_index = 0
+        app.profile_store = ProfileStore(profiles={"Alex": profile}, selected="Alex")
+        app.profiles_path = Path(tempfile.gettempdir()) / "unused-profiles.json"
+        app.status = ""
+        app._save_profile_store = Mock(return_value=True)
+
+        app._handle_profile_command("save Alex")
+
+        self.assertEqual(app.profile_store.profiles["Alex"].persona, "Friendly helper")
+
     def test_profile_save_captures_and_persists_active_chat_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app = ChatApp.__new__(ChatApp)
             app.sessions = [
-                SimpleNamespace(
+                ChatSession(
+                    local_id="test",
                     player_name="Alex",
                     persona="Friendly helper",
                     chat_log="Player: Hello\nAI: Hi there!",
+                    server_session_id=1,
                 )
             ]
             app.active_index = 0
             app.profile_store = ProfileStore(profiles={})
             app.profiles_path = Path(temp_dir) / "chat_profiles.json"
+            app.data_file = Path(temp_dir) / "chat_sessions.json"
             app.status = ""
 
             app._handle_profile_command("save test-profile")
@@ -1011,6 +1127,39 @@ class CodingToolsTests(unittest.TestCase):
                 loaded.profiles["test-profile"].chat_log,
                 "Player: Hello\nAI: Hi there!",
             )
+            self.assertEqual(load_sessions(app.data_file)[0].profile_name, "test-profile")
+
+            app.sessions[0].chat_log = "Player: Hello again\nAI: Welcome back!"
+            self.assertTrue(app._sync_profile_chat_log(app.sessions[0]))
+            self.assertEqual(
+                load_profiles(app.profiles_path).profiles["test-profile"].chat_log,
+                "Player: Hello again\nAI: Welcome back!",
+            )
+
+    def test_export_command_writes_active_chat_without_overwriting_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output = root / "export.txt"
+            app = ChatApp.__new__(ChatApp)
+            app.sessions = [
+                ChatSession(
+                    local_id="test",
+                    player_name="Alex",
+                    persona="Friendly helper",
+                    chat_log="Player: Hello\nAI: Hi there!",
+                    server_session_id=1,
+                )
+            ]
+            app.active_index = 0
+            app.pending_message = ""
+            app.status = ""
+
+            app.handle_command(f'/export "{output}"')
+
+            self.assertEqual(output.read_text(encoding="utf-8"), "Player: Hello\nAI: Hi there!")
+            self.assertIn("Exported chat", app.status)
+            app.handle_command(f'/export "{output}"')
+            self.assertIn("already exists", app.status)
 
     def test_chat_log_can_be_loaded_from_saved_session_or_profile(self) -> None:
         app = ChatApp.__new__(ChatApp)

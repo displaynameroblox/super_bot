@@ -1,4 +1,5 @@
 import json
+import contextlib
 import os
 import re
 import shlex
@@ -6,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import signal
+from collections import deque
 from queue import Empty, Queue
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -47,19 +50,19 @@ PROVIDER_SPECS = {
     "copilot": {
         "label": "GitHub Copilot CLI",
         "executable": "copilot",
-        "template": "copilot -p {prompt}",
+        "template": "copilot --allow-tool=read --allow-tool=write --deny-tool=shell --no-ask-user -p {prompt}",
         "website": "https://docs.github.com/en/copilot",
     },
     "claude": {
         "label": "Claude Code",
         "executable": "claude",
-        "template": "claude -p {prompt}",
+        "template": "claude --permission-mode acceptEdits -p {prompt}",
         "website": "https://docs.anthropic.com/en/docs/claude-code",
     },
     "codex": {
         "label": "OpenAI Codex CLI",
         "executable": "codex",
-        "template": "codex exec {prompt}",
+        "template": "codex exec --sandbox workspace-write --ephemeral {prompt}",
         "website": "https://github.com/openai/codex",
     },
     "aider": {
@@ -121,7 +124,7 @@ INSTALL_TIMEOUT_SECONDS = 900
 @dataclass
 class CodingState:
     provider: str = "copilot"
-    command_template: str = "copilot -p {prompt}"
+    command_template: str = str(PROVIDER_SPECS["copilot"]["template"])
     coding_mode: str = "brief"
     workspace: str = ""
     skills: list[str] = field(default_factory=list)
@@ -191,6 +194,11 @@ def load_coding_state(path: Path) -> CodingState:
                 values[key] = default
         elif isinstance(value, type(default)):
             values[key] = value
+    # Migrate only the old built-in commands; preserve user configurations.
+    legacy = {"copilot": "copilot -p {prompt}", "claude": "claude -p {prompt}", "codex": "codex exec {prompt}"}
+    provider = values.get("provider", "copilot")
+    if values.get("command_template") == legacy.get(provider):
+        values["command_template"] = provider_template(provider)
     return CodingState(**values)
 
 
@@ -547,6 +555,30 @@ def run_command(argv: list[str], workspace: Path) -> tuple[int, str]:
     return result.returncode, output[-MAX_AGENT_OUTPUT:]
 
 
+def agent_environment(argv: list[str], workspace: Path) -> dict[str, str]:
+    environment = command_environment(workspace)
+    provider = Path(argv[0]).name.removesuffix(".exe").removesuffix(".cmd")
+    credentials = {
+        "copilot": ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
+        "claude": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+        "codex": ("CODEX_API_KEY", "OPENAI_API_KEY"),
+        "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    }
+    for name in credentials.get(provider, ()):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    return environment
+
+
+def agent_failure_reason(output: str) -> str:
+    lowered = output.casefold()
+    if any(marker in lowered for marker in ("monthly quota", "quota exceeded", "exceeded your quota")):
+        return "Agent quota exceeded. Restore quota or select another CLI with /agent use NAME."
+    if any(marker in lowered for marker in ("not authenticated", "authentication required", "please log in", "please login", "no authentication")):
+        return "Agent login required. Sign in to the selected CLI in your terminal, then retry."
+    return ""
+
+
 def run_agent(
     command_template: str,
     prompt: str,
@@ -569,6 +601,8 @@ def run_agent(
 class AgentProcess:
     def __init__(self, command_template: str, prompt: str, workspace: Path) -> None:
         self.argv = build_agent_argv(command_template, prompt)
+        if shutil.which(self.argv[0]) is None:
+            raise FileNotFoundError(f"Coding CLI '{self.argv[0]}' is missing. Use /agent install or /agent configure.")
         self.sandbox = Path(tempfile.mkdtemp(prefix="super-bot-agent-")) / "workspace"
         try:
             shutil.copytree(
@@ -581,7 +615,7 @@ class AgentProcess:
             self.process = subprocess.Popen(
                 self.argv,
                 cwd=self.sandbox,
-                env=command_environment(self.sandbox),
+                env=agent_environment(self.argv, self.sandbox),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -589,17 +623,23 @@ class AgentProcess:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                start_new_session=(os.name != "nt"),
             )
         except (OSError, subprocess.SubprocessError, ValueError):
             shutil.rmtree(self.sandbox.parent, ignore_errors=True)
             raise
         self.output: list[str] = []
-        self.lines: Queue[str] = Queue()
+        self.lines: deque[str] = deque()
+        self._output_lock = threading.Lock()
+        self._pending_chars = 0
         self.cancelled = False
         self.patch = ""
         self.patch_error = ""
         self.return_code: int | None = None
         self.reader = threading.Thread(target=self._read_output, daemon=True)
+        self.deadline = threading.Timer(3600, self.cancel)
+        self.deadline.daemon = True
+        self.deadline.start()
         self.reader.start()
 
     @staticmethod
@@ -682,8 +722,12 @@ class AgentProcess:
 
     def _read_output(self) -> None:
         if self.process.stdout is not None:
-            for line in self.process.stdout:
-                self.lines.put(line.rstrip("\r\n"))
+            while chunk := self.process.stdout.readline(4096):
+                with self._output_lock:
+                    self.lines.append(chunk)
+                    self._pending_chars += len(chunk)
+                    while self._pending_chars > MAX_AGENT_OUTPUT and len(self.lines) > 1:
+                        self._pending_chars -= len(self.lines.popleft())
             self.process.stdout.close()
         self.return_code = self.process.wait()
         try:
@@ -713,17 +757,16 @@ class AgentProcess:
         except (OSError, subprocess.SubprocessError) as exc:
             self.patch_error = f"Could not prepare the agent diff: {exc}"
         finally:
+            if hasattr(self, "deadline"):
+                self.deadline.cancel()
             shutil.rmtree(self.sandbox.parent, ignore_errors=True)
 
     def collect_output(self) -> list[str]:
-        collected = []
-        while True:
-            try:
-                line = self.lines.get_nowait()
-            except Empty:
-                break
-            collected.append(line)
-            self.output.append(line)
+        with self._output_lock:
+            collected = "".join(self.lines).splitlines()
+            self.lines.clear()
+            self._pending_chars = 0
+        self.output.extend(collected)
         if self.output:
             combined = "\n".join(self.output)
             if len(combined) > MAX_AGENT_OUTPUT:
@@ -736,8 +779,18 @@ class AgentProcess:
 
     def cancel(self) -> None:
         self.cancelled = True
-        if self.process.poll() is None:
-            self.process.terminate()
+        if os.name != "nt" or self.process.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], capture_output=True, check=False)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                def kill_remaining():
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                timer = threading.Timer(2, kill_remaining)
+                timer.daemon = True
+                timer.start()
 
 
 def provider_help(executable: str, workspace: Path) -> tuple[int, str]:

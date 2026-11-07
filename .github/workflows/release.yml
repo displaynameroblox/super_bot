@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -e . pytest
+      - run: python -m pip install -e ".[pdf]" pytest
       - run: python -m pytest Ai -q
 
   build:
@@ -33,7 +33,39 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install build && python -m build
+      - run: python -m pip install build cryptography packaging
+      - run: python -m build
+      - name: Build signed server release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from cryptography.hazmat.primitives import serialization
+          from tools.build_release import build
+          key_text = os.environ.get('RELEASE_SIGNING_KEY', '')
+          if not key_text:
+              raise SystemExit('Configure RELEASE_SIGNING_KEY and commit Ai/release-public.pem before publishing.')
+          key_path = Path(os.environ['RUNNER_TEMP']) / 'release-signing.pem'
+          try:
+              key_path.write_text(key_text)
+              key_path.chmod(0o600)
+              private = serialization.load_pem_private_key(key_text.encode(), password=None)
+              public = serialization.load_pem_public_key(Path('Ai/release-public.pem').read_bytes())
+              if private.public_key().public_numbers() != public.public_numbers():
+                  raise SystemExit('Release signing key does not match the pinned public key.')
+              tag = os.environ['GITHUB_REF_NAME'][1:]
+              import tomllib
+              from packaging.version import Version
+              if Version(tomllib.loads(Path('pyproject.toml').read_text())['project']['version']) != Version(tag):
+                  raise SystemExit('Tag version must match pyproject.toml version.')
+              build(Path.cwd(), Path('dist'), key_path, tag,
+                    'development' if Version(tag).is_prerelease else 'stable')
+          finally:
+              key_path.unlink(missing_ok=True)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -46,6 +78,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: dist
@@ -55,5 +88,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           flags=""
-          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Super Bot $GITHUB_REF_NAME" --generate-notes $flags
+          case "$GITHUB_REF_NAME" in *alpha*|*beta*|*-*|*rc[0-9]*|*a[0-9]*|*b[0-9]*|*dev[0-9]*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Super Bot $GITHUB_REF_NAME" --notes-file docs/releases/v2.1.0.alpha.1.md $flags

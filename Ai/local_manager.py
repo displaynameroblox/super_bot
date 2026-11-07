@@ -18,6 +18,8 @@ from Ai import chat_training, knowledge
 
 
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
+SUPERBOT_CHATTER_REPOSITORY = "Displaynamethecat/super-bot_chatter-0.1"
+SUPERBOT_CHATTER_BASE_MODEL = "google/gemma-2-2b-it"
 
 
 def data_directory() -> Path:
@@ -116,6 +118,21 @@ def _index_bytes(
     )
 
 
+def index_database(args: argparse.Namespace) -> Path:
+    values = vars(args)
+    database_path = values.get("database")
+    account_id = values.get("account_id")
+    if database_path is not None and account_id is not None:
+        raise ValueError("Use either --database or --account-id, not both.")
+    if account_id is not None:
+        from Ai import client_data
+        server_url = values.get("server_url") or os.getenv("CHAT_SERVER_URL", "")
+        if not server_url:
+            raise ValueError("Choose --server-url when indexing a client account library.")
+        return client_data.directory_for_url(server_url) / "knowledge" / f"{account_id}.db"
+    return Path(database_path) if database_path is not None else knowledge.default_database_path()
+
+
 def index_file(args: argparse.Namespace) -> int:
     path = args.file.expanduser().resolve()
     if not path.is_file():
@@ -135,7 +152,7 @@ def index_file(args: argparse.Namespace) -> int:
         author=args.author,
         published_at=args.published_at,
         license_name=args.license,
-        database=args.database,
+        database=index_database(args),
     )
     print(f"Indexed {count} passages from {path}")
     return count
@@ -176,13 +193,13 @@ def index_url(args: argparse.Namespace) -> int:
         author=args.author,
         published_at=args.published_at,
         license_name=args.license,
-        database=args.database,
+        database=index_database(args),
     )
     print(f"Indexed {count} passages from {effective_url}")
     return count
 
 
-def download_model(args: argparse.Namespace) -> Path:
+def download_model(args: argparse.Namespace, *, announce: bool = True) -> Path:
     try:
         from huggingface_hub import hf_hub_download
     except ImportError as exc:
@@ -196,6 +213,7 @@ def download_model(args: argparse.Namespace) -> Path:
             repo_id=args.repo,
             filename=args.filename,
             local_dir=destination,
+            revision=getattr(args, "revision", None),
         )
     else:
         from huggingface_hub import snapshot_download
@@ -204,8 +222,36 @@ def download_model(args: argparse.Namespace) -> Path:
             repo_id=args.repo,
             local_dir=destination / args.repo.replace("/", "--"),
         )
-    print(f"Downloaded model to {path}")
+    if announce:
+        print(f"Downloaded model to {path}")
     return Path(path)
+
+
+def download_superbot_model(args: argparse.Namespace) -> Path:
+    return download_model(
+        argparse.Namespace(
+            repo=SUPERBOT_CHATTER_REPOSITORY,
+            filename=None,
+            directory=args.directory,
+        )
+    )
+
+
+def serve_superbot_model(args: argparse.Namespace) -> None:
+    serve_model(
+        argparse.Namespace(
+            backend="mlx",
+            model_path=None,
+            model=SUPERBOT_CHATTER_BASE_MODEL,
+            adapter_dir=args.adapter_dir,
+            host=args.host,
+            port=args.port,
+            context_size=4096,
+            threads=max(1, os.cpu_count() or 1),
+            api_key="local-superbot",
+            executable="llama-server",
+        )
+    )
 
 
 def train_model(args: argparse.Namespace) -> None:
@@ -389,6 +435,17 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--directory", type=Path, default=data_directory() / "models")
     download.set_defaults(handler=download_model)
 
+    superbot_download = commands.add_parser(
+        "download-superbot",
+        help="Download the published Super Bot Chatter LoRA adapter",
+    )
+    superbot_download.add_argument(
+        "--directory",
+        type=Path,
+        default=data_directory() / "adapters" / "super-bot_chatter-0.1",
+    )
+    superbot_download.set_defaults(handler=download_superbot_model)
+
     train = commands.add_parser("train", help="Fine-tune a local model with Transformers/PEFT LoRA")
     train.add_argument("--model", default="google/gemma-2-2b-it")
     train.add_argument("--data-dir", type=Path, required=True)
@@ -428,6 +485,19 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--executable", default="llama-server")
     serve.set_defaults(handler=serve_model)
 
+    superbot_serve = commands.add_parser(
+        "serve-superbot",
+        help="Run Super Bot Chatter with MLX and its Gemma base model",
+    )
+    superbot_serve.add_argument(
+        "--adapter-dir",
+        type=Path,
+        default=data_directory() / "adapters" / "super-bot_chatter-0.1",
+    )
+    superbot_serve.add_argument("--host", default="127.0.0.1")
+    superbot_serve.add_argument("--port", type=int, default=8080)
+    superbot_serve.set_defaults(handler=serve_superbot_model)
+
     index = commands.add_parser("index", help="Add or refresh one local knowledge source")
     source = index.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", type=Path)
@@ -437,48 +507,71 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--author", default="")
     index.add_argument("--published-at", default="")
     index.add_argument("--license", default="")
-    index.add_argument("--database", type=Path, default=knowledge.default_database_path())
+    index.add_argument("--database", type=Path)
+    index.add_argument("--server-url", help="server address identifying the local client data folder")
+    index.add_argument(
+        "--account-id",
+        type=int,
+        help="index into one local account's private knowledge library",
+    )
     index.set_defaults(handler=lambda args: index_file(args) if args.file else index_url(args))
 
     create = commands.add_parser("create-backup", help="Back up the accounts and chats database")
     create.add_argument("--database", type=Path)
+    create.add_argument("--server-url")
     create.set_defaults(handler=create_database_backup)
 
     listing = commands.add_parser("list-backups", help="List database backups")
     listing.add_argument("--database", type=Path)
+    listing.add_argument("--server-url")
     listing.set_defaults(handler=list_database_backups)
 
     restore = commands.add_parser(
-        "restore-backup", help="Restore the database from a backup (stop the server first)"
+        "restore-backup", help="Restore the database from a backup (stop the client first)"
     )
     restore.add_argument("backup", type=Path)
     restore.add_argument("--database", type=Path)
+    restore.add_argument("--server-url")
     restore.set_defaults(handler=restore_database_backup)
 
+    parser.epilog = "Server administration: init, start, stop, restart, status, logs, source, update, config, remote, admin (each supports --help)."
     return parser
+
+
+def client_database_argument(args) -> Path:
+    if args.database:
+        return args.database.expanduser()
+    from Ai import client_data
+    server_url = getattr(args, "server_url", None) or os.getenv("CHAT_SERVER_URL", "")
+    if not server_url:
+        raise ValueError("Choose --database PATH or --server-url URL for the client data to manage.")
+    return client_data.directory_for_url(server_url) / "client.db"
 
 
 def create_database_backup(args: argparse.Namespace) -> None:
     from Ai import backup, database
 
-    print(backup.create_backup(args.database or database.default_path()))
+    print(backup.create_backup(client_database_argument(args)))
 
 
 def list_database_backups(args: argparse.Namespace) -> None:
     from Ai import backup, database
 
-    for info in backup.list_backups(args.database or database.default_path()):
+    for info in backup.list_backups(client_database_argument(args)):
         print(info.path)
 
 
 def restore_database_backup(args: argparse.Namespace) -> None:
     from Ai import backup, database
 
-    previous = backup.restore_backup(args.backup, args.database or database.default_path())
+    previous = backup.restore_backup(args.backup, client_database_argument(args))
     print(f"Restored. Your previous data was saved to {previous}" if previous else "Restored.")
 
 
 def main() -> None:
+    from Ai.manager_cli import COMMANDS, main as manager_main
+    if len(sys.argv) > 1 and (sys.argv[1] in COMMANDS or sys.argv[1].startswith(("--instance", "--json", "--timeout"))):
+        raise SystemExit(manager_main(sys.argv[1:]))
     args = build_parser().parse_args()
     handler = args.handler
     handler(args)

@@ -1,3 +1,14 @@
+# Shared server management
+
+For a fresh wheel install, follow the [binary-only Termux setup](../../docs/server-administration.md#termux). It uses prebuilt dependencies and exits if a compatible wheel is unavailable.
+
+Prefer the [shared Python manager](../../docs/server-administration.md) for server
+start/stop, signed updates, rollback and administration. The model menu below is
+retained for local inference. When the manager is installed, secure-server actions
+delegate to it. Startup is offline and local-only by default. Set `HOST` and
+`SUPER_BOT_ALLOW_LAN=1` explicitly to share the server. The legacy updater requires
+an explicit `MAC_SERVER_URL`; there is no built-in developer address.
+
 # Manage local models in Termux
 
 The phone runs `llama.cpp` and exposes one OpenAI-compatible API on trusted
@@ -7,26 +18,33 @@ the stable model name `superbot-phone`, regardless of which GGUF is selected.
 
 ## Install or update the phone manager
 
-Connect the Mac and phone to the same trusted Wi-Fi network. From the
-repository root on the Mac, run:
+On the Mac, run `bash Ai/termux/serve-from-mac.sh` from the checkout.
+The publisher creates a persistent signing key at
+`~/.config/superbot/release-private.pem` on first use. Existing installations
+must continue using their original signing key, passed as the optional argument.
+
+On the phone, download the launcher, updater, requirements, and public key
+over a trusted connection. Set the Mac address first.
 
 ```sh
-    bash Ai/termux/serve-from-mac.sh
-```
-
-In Termux, stop the currently running model server with Ctrl+C, then fetch the
-updated launcher using the command printed by the Mac script:
-
-```sh
-pkg install curl
-curl --fail --location http://MAC_IP:8765/termux/start-server.sh -o start-server.sh
+export MAC_SERVER_URL=http://YOUR_MAC_IP:8765
+mkdir -p "$HOME/superbot-launcher"
+cd "$HOME/superbot-launcher"
+for file in start-server.sh update-server.py requirements.txt release-public.pem; do
+    curl --fail --location "$MAC_SERVER_URL/$file" -o "$file" || break
+done
 bash start-server.sh
 ```
 
-Replace `MAC_IP` with the Mac's Wi-Fi address. The manager installs missing
-Termux packages (`llama-cpp`, `curl`, `wget`, and coreutils) and keeps existing
-models and the API key in place. The model files live in `~/models`; manager
-settings and the API key live in `~/.config/superbot`.
+Choose **7** for the first signed installation or an update, then **1** for
+the local phone model. Once installed, choose **6** for normal startup.
+Normal startup uses the installed release and local model without contacting
+the Mac. Keep the downloaded files together. The Mac publisher can be stopped
+after the update completes. New model downloads and missing dependency
+installation still require internet access.
+
+The model files remain in `~/models`, and the selected model and API key remain
+in `~/.config/superbot`.
 
 ## Use the model manager
 
@@ -35,8 +53,8 @@ Running `bash start-server.sh` opens a menu:
 1. List installed `.gguf` models and show the selected model.
 2. Download Qwen3 4B Q4_K_M (~2.5 GB), Qwen3 8B Q4_K_M (~5.0 GB),
    Gemma 1.1 7B instruct Q4_K_M (~5.3 GB), Gemma 2 9B instruct Q4_K_M
-   (~5.8 GB), another Hugging Face GGUF, or the experimental locally trained
-   model shared on Hugging Face (option 6; **still testing**). The 7B/9B models
+   (~5.8 GB), another Hugging Face GGUF, or Super Bot Chatter
+   (option 6; ~5.2 GB). The 7B/9B models
    need roughly 7+ GB of free RAM; try Qwen3 4B first if your phone struggles.
    Gemma downloads come from the ungated `bartowski` repositories.
 3. Select the model to launch.
@@ -53,11 +71,10 @@ The manager resumes interrupted downloads and validates the GGUF file header
 before adding it. For custom downloads it shows available storage and asks for
 confirmation because the file size is not known in advance.
 
-The experimental option downloads the model directly from the
-[Hugging Face repository](https://huggingface.co/Displaynamethecat/gemma-2-2b-it-friendly-gguf)
-into `~/models` (about 1.7 GB). The download resumes if interrupted and the
-manager validates the GGUF header before installing. This model is still being
-tested; local inference compatibility and quality are not yet confirmed.
+Option 6 downloads
+[Super Bot Chatter](https://huggingface.co/Displaynamethecat/super-bot_chatter-0.1)
+into `~/models` (about 5.2 GB). The download resumes if interrupted and the
+manager validates the GGUF header before installing.
 
 You can also use its CLI:
 
@@ -102,7 +119,12 @@ TEST_PHONE_API_KEY=your-phone-api-key
 
 These settings are only needed when using the phone's local model. To use
 Gemini instead, choose it from menu option 6 and enter a Google AI Studio API
-key at the hidden prompt; a local model URL and key are not needed.
+key at the hidden prompt; a local model URL and key are not needed. OpenAI is
+also available in that menu: enter an OpenAI API key at the hidden prompt and
+a model ID that supports Chat Completions with JSON schema responses. For direct
+server startup, set `PHONE_MODEL_PROVIDER=openai`, `OPENAI_API_KEY`, and
+`OPENAI_MODEL_NAME` in the server environment or ignored `.env` file. Chat content
+and included context are sent to OpenAI over HTTPS.
 
 Replace `PHONE_IP` and the example key locally; never commit or share the
 actual key. Then restart the Mac session server with `python -m Ai.server`.
@@ -157,15 +179,45 @@ address is part of the certificate.
 
 ## Run Super Bot on the phone (recommended)
 
-Menu option 6 downloads/updates the `Ai` folder from the Mac server into
-`~/super_bot/Ai`, installs its Python requirements, and runs the Super Bot
-server. It asks whether to use the phone's local model (default) or Google
-Gemini. Gemini requires a Google AI Studio API key, entered at a hidden prompt;
-the key is kept in memory only for that server run. Gemini sends conversation
-messages to Google. The default Mac URL is
-`http://192.168.8.179:8765`; set `MAC_SERVER_URL` before starting the manager
-to use a different address. Keep the Mac server running while option 6
-downloads the files, and use trusted Wi-Fi.
+Create a release signing key on the Mac once, from a private directory outside the checkout. Keep the private key outside the
+checkout and off the phone.
+
+```sh
+umask 077
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out release-private.pem
+openssl pkey -in release-private.pem -pubout -out release-public.pem
+```
+
+Transfer `release-public.pem` through the same trusted channel as the launcher
+and place it at `~/.config/superbot/release-public.pem` on the phone. An alternate
+trusted public key path can be set with `SUPER_BOT_RELEASE_KEY`.
+
+From the Mac checkout, publish the current source and its detached signature.
+
+```sh
+bash Ai/termux/serve-from-mac.sh /path/to/release-private.pem
+```
+
+Set `MAC_SERVER_URL=http://MAC_IP:8765` on the phone and select menu option 7.
+Choose the local phone model (default), Gemini, or OpenAI. Cloud providers send
+chat content to their respective APIs and require an API key. OpenAI also requires
+a model ID. The Mac serves only the release archive and
+signature. The phone verifies the signature before extracting any files.
+
+The updater checks for a release when option 7 is selected. To update a running server, stop it with Ctrl+C and
+select option 7 again. The candidate stays in `~/super_bot/.releases` and becomes
+active only after its HTTPS health response identifies both its signed build
+and its new process launch. If verification fails, the launcher stops the
+candidate and starts the previous installation. The existing install directory
+remains the working directory, so relative configuration paths, `.env`, model
+files, and the configured server identity remain in place. Releases should
+keep any durable data formats backward compatible. The current backend keeps
+active session state in RAM.
+
+Use `SUPER_BOT_OFFLINE=1 bash start-server.sh` to start the installed release
+with local dependencies and skip the download. Set `SUPER_BOT_PORT` in the
+launcher environment for a custom secure server port.
+
 It installs `cryptography` from Termux's prebuilt `python-cryptography` package
 so pip does not need to build it on the phone. Uvicorn is installed without
 its optional `standard` extras because those include `watchfiles`, which
@@ -178,7 +230,9 @@ This fallback can take a while and needs available memory.
 
 When using the phone's local model, `llama-server` binds to `127.0.0.1`
 (override with `LLAMA_HOST`), so the model is unreachable from the network even
-without TLS. With either provider, the only open port is the Super Bot HTTPS +
+without TLS. With any provider, the only open port is the Super Bot HTTPS +
 E2EE port (default 8000). After the download completes, connect the client to
 `https://PHONE_IP:8000` and confirm the fingerprint. The local model link is
-loopback, so no `PHONE_MODEL_CA_CERT` is needed.
+loopback, so no `PHONE_MODEL_CA_CERT` is needed. The launcher explicitly sets
+`SUPER_BOT_ALLOW_LAN=1` only for this encrypted server so other devices can
+connect to it.

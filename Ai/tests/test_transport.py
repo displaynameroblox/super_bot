@@ -417,5 +417,27 @@ class ContextTests(unittest.TestCase):
         self.assertGreaterEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
 
 
+class EventHeartbeatTests(unittest.TestCase):
+    def test_slow_events_keep_the_connection_open(self):
+        websocket = MagicMock()
+        websocket.recv.side_effect = [b"handshake", TimeoutError(), b"event"]
+        exchange = MagicMock()
+        exchange.open_response.return_value = {"status": 200}
+        exchange.stream_decryptor.return_value.open.return_value = {"type": "progress"}
+        with (
+            patch.object(transport, "_require_pin") as pin,
+            patch.object(transport, "_context_for"),
+            patch.object(transport.e2ee, "seal_request", return_value=(b"hello", exchange)),
+            patch("websockets.sync.client.connect") as connect,
+        ):
+            pin.return_value.e2ee_public_key = b"key"
+            connect.return_value.__enter__.return_value = websocket
+            with transport.open_event_stream(URL, 7, "token") as stream:
+                self.assertIsNone(stream.recv(timeout=0.01))
+                self.assertEqual(stream.recv(timeout=0.01), {"type": "progress"})
+            self.assertIsNone(connect.call_args.kwargs["ping_timeout"])
+            self.assertEqual(connect.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

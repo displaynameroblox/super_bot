@@ -62,7 +62,7 @@ class ProfileStore:
         self._clock = clock
 
     def get(self, user_id: int) -> dict[str, Any]:
-        with self.database.connection() as db:
+        with self.database.read_connection() as db:
             row = db.execute(
                 "SELECT display_name, avatar, preferences_json, model_settings_json "
                 "FROM profiles WHERE user_id = ?",

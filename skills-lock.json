@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "skills": {
+    "tui-design": {
+      "source": "registry:pedronauck/tui-design",
+      "commit_sha": "8290324ef242195799f1550b0cec96aa47e8416a",
+      "digest": "sha256:033066fffeb4300831d6a47328eadae320dd1897f8b140a31f0fec0fb223bb19",
+      "agents": [
+        "codex"
+      ],
+      "mode": {
+        "codex": "canonical"
+      }
+    },
+    "tui-fundamentals": {
+      "source": "registry:josiahsiegel/tui-fundamentals",
+      "commit_sha": "0d9c50a09d6f459bf264a93a140304ca19394d7b",
+      "digest": "sha256:d63ec7d6eab804e199af796ea4f32eed3a4b74822280218a42bd652e256254df",
+      "agents": [
+        "codex"
+      ],
+      "mode": {
+        "codex": "canonical"
+      }
+    },
+    "tui-visual-design": {
+      "source": "registry:josiahsiegel/tui-visual-design",
+      "commit_sha": "a9a833cc57422141e0238187d9da7045d4618eca",
+      "digest": "sha256:54dc3ac70272fa63873945f0be1ba5bc71c56a58c6e1510897d8be112e878789",
+      "agents": [
+        "codex"
+      ],
+      "mode": {
+        "codex": "canonical"
+      }
+    }
+  }
+}

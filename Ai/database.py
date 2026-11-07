@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 import threading
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -114,18 +115,32 @@ class Database:
 
     def __init__(self, path: Path | str, *, backup_before_migrate: bool = True) -> None:
         self.path = Path(path).expanduser()
+        self._memory_uri = f"file:superbot-{uuid.uuid4().hex}?mode=memory&cache=shared" if str(path) == ":memory:" else None
+        self._anchor = sqlite3.connect(self._memory_uri, uri=True, check_same_thread=False) if self._memory_uri else None
         self._write_lock = threading.RLock()
         self._backup_before_migrate = backup_before_migrate
         self._prepare()
 
     def _open(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        connection = sqlite3.connect(self._memory_uri or self.path, uri=bool(self._memory_uri), timeout=15, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 15000")
         return connection
 
+    def close(self) -> None:
+        if getattr(self, "_anchor", None) is not None:
+            self._anchor.close()
+            self._anchor = None
+
+    def __del__(self):
+        self.close()
+
     def _prepare(self) -> None:
+        if self._memory_uri:
+            with contextlib.closing(self._open()) as connection:
+                self._migrate(connection, 0)
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -184,6 +199,18 @@ class Database:
                 with contextlib.suppress(sqlite3.Error):
                     connection.execute("ROLLBACK")
                 raise
+
+    @contextlib.contextmanager
+    def read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Read a consistent snapshot without reserving the SQLite writer."""
+        guard = self._write_lock if self._memory_uri else contextlib.nullcontext()
+        with guard, contextlib.closing(self._open()) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            try:
+                yield connection
+            finally:
+                connection.execute("ROLLBACK")
 
     @contextlib.contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

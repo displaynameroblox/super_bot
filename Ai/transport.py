@@ -603,6 +603,8 @@ def open_event_stream(
                     compression=None,
                     open_timeout=open_timeout,
                     close_timeout=1,
+                    # Phone inference can delay pong frames for minutes.
+                    ping_timeout=None,
                 )
             )
         except ssl.SSLCertVerificationError as exc:

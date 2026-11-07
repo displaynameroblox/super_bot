@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -44,11 +45,12 @@ class SessionStore:
         password_verifier: tuple[bytes, bytes] | None,
         host_token_hash: bytes | None,
         owner_user_id: int | None = None,
+        connection=None,
     ) -> None:
         """Insert or update a session. The owner is set once, when it is created."""
         now = self._clock()
         salt, digest = password_verifier if password_verifier else (None, None)
-        with self.database.connection() as db:
+        with (contextlib.nullcontext(connection) if connection is not None else self.database.connection()) as db:
             db.execute(
                 "INSERT INTO chat_sessions (id, owner_user_id, chat_log, ai_persona, plr_name, "
                 "ai_style, ai_skills_json, password_salt, password_digest, host_token_hash, "
@@ -125,7 +127,7 @@ class SessionStore:
         if query.strip():
             sql += " AND chat_log LIKE ? ESCAPE '\\'"
             params.append(f"%{_escape_like(query.strip())}%")
-        with self.database.connection() as db:
+        with self.database.read_connection() as db:
             rows = db.execute(sql + " ORDER BY updated_at DESC, id DESC", params).fetchall()
         return [
             {
@@ -139,7 +141,7 @@ class SessionStore:
         ]
 
     def get_for_user(self, user_id: int, session_id: int) -> dict[str, Any] | None:
-        with self.database.connection() as db:
+        with self.database.read_connection() as db:
             row = db.execute(
                 "SELECT id, chat_log, ai_persona, plr_name, ai_style FROM chat_sessions "
                 "WHERE id = ? AND owner_user_id = ?",
@@ -166,7 +168,7 @@ class SessionStore:
             )
 
     def owner_of(self, session_id: int) -> int | None:
-        with self.database.connection() as db:
+        with self.database.read_connection() as db:
             row = db.execute(
                 "SELECT owner_user_id FROM chat_sessions WHERE id = ?", (session_id,)
             ).fetchone()

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import coding_tools, preflight, tls, transport
+    from . import client_data, coding_tools, preflight, tls, transport, tui
     from .protocol import (
         CHAT_SKILLS,
         DISCOVERY_PORT,
@@ -36,6 +36,7 @@ try:
         STYLE_PRESETS,
     )
 except ImportError:
+    from Ai import client_data, tui
     import coding_tools
     import preflight
     import tls
@@ -97,6 +98,12 @@ PROFILES AND CHAT HISTORY
                               a session.
 /profile clear                Stop using the selected profile.
 /profile delete NAME          Delete a saved profile.
+/setup                        Run the first-run profile setup wizard.
+/character status|on NOTES|off
+                              Store opt-in local character notes for the selected
+                              profile; notes are sent only when creating its chats.
+/export [PATH]                Export the active chat to a text file. Without a
+                              path, saves beside local chat data.
 /style [NAME|TEXT|off]        Set the AI's reply style for this session: a preset
                               (casual, formal, playful, friendly, technical,
                               concise) or your own words. /style lists presets;
@@ -116,6 +123,10 @@ PROFILES AND CHAT HISTORY
 /log load profile NAME        Use a profile's chat log when creating a session.
                               Quote names with spaces, e.g. "Friendly cat".
 /log clear                    Clear the staged starting chat log.
+/account login|logout|status  Sign in to an account for private knowledge and
+                              locally saved chats. Account tokens are memory-only.
+/knowledge [list|add FILE [CATEGORY]|delete ID]
+                              Manage private account knowledge from the Data tab.
 
 MESSAGES AND PROGRESS
 /retry cancel                 Cancel a message retry waiting for its next
@@ -124,8 +135,8 @@ MESSAGES AND PROGRESS
 /progress on|off              Show or hide progress for your own messages.
                               The session host can always see everyone's progress.
 /learn on|off                 Opt your future messages and AI replies in this
-                              session into the server's local training queue.
-                              This requires server collection to be enabled.
+                              session into your local training queue.
+                              Training examples are saved only on this client.
 
 CODING WORKFLOW
 /code REQUEST                 Ask the phone model to prepare a coding brief.
@@ -178,9 +189,13 @@ AGENTS AND SKILLS
 VIEWS AND KEYBOARD
 /view chat|activity|coding|review|split
                               Switch views. Split shows chat and coding together.
-Tab/Shift+Tab or Left/Right   Switch tabs; F2-F5 jump directly to a tab.
-F6                            Toggle split view. F1 shows or hides navigation help.
-Ctrl+P                         Open the action menu.
+Tab/Shift+Tab                 Switch tabs; F2-F6 jump directly to a tab.
+Left/Right, Home/End          Move within your draft (empty draft: navigate views).
+Ctrl+U / Ctrl+W               Clear the draft / delete the previous word.
+F7                            Toggle split view. F1 shows or hides navigation help.
+Ctrl+P                         Search actions and commands; Enter selects.
+Ctrl+O                         Find a saved conversation.
+Tab after /                    Search commands matching your input.
 Up/Down or Page Up/Page Down  Scroll the current view. Home goes to the beginning;
                               End returns to the latest content.
 
@@ -214,6 +229,8 @@ class ChatSession:
     server_session_id: int
     access_token: str = ""
     server_url: str = ""
+    profile_name: str = ""
+    style: str = ""
     chat_skills: dict[str, str] = field(default_factory=dict)
     learn_from_chats: bool = False
 
@@ -223,6 +240,11 @@ class ChatProfile:
     player_name: str
     persona: str
     chat_log: str = ""
+    style: str = ""
+    chat_skills: dict[str, str] = field(default_factory=dict)
+    preferred_model: str = ""
+    character_development_enabled: bool = False
+    character_notes: str = ""
 
 
 @dataclass
@@ -235,6 +257,20 @@ class ProfileStore:
 class UIPreferences:
     show_progress: bool = True
     show_navigation_help: bool = True
+
+
+@dataclass
+class SetupState:
+    completed: bool = False
+    preferred_model: str = ""
+
+
+MODEL_CHOICES = (
+    "Super Bot Chatter (local adapter)",
+    "Existing local phone model",
+    "Gemini (server configured)",
+)
+MAX_CHARACTER_NOTES_LENGTH = 500
 
 
 @dataclass
@@ -256,7 +292,7 @@ PROGRESS_LABELS = {
     "complete": "Reply received",
     "failed": "Request failed",
 }
-TABS = ("Chat", "Activity", "Coding", "Review")
+TABS = ("Chat", "Data", "Activity", "Coding", "Review")
 PROGRESS_ACTIVE_TTL_SECONDS = 60
 PROGRESS_TERMINAL_TTL_SECONDS = 5
 TERMINAL_PROGRESS_PHASES = {"complete", "failed"}
@@ -314,6 +350,12 @@ def load_sessions(path: Path) -> list[ChatSession]:
             raise ValueError(
                 f"Saved chat #{index} in {path} has invalid learning preference"
             )
+        profile_name = item.get("profile_name", "")
+        if not isinstance(profile_name, str):
+            raise ValueError(f"Saved chat #{index} in {path} has invalid profile name")
+        style = item.get("style", "")
+        if not isinstance(style, str):
+            raise ValueError(f"Saved chat #{index} in {path} has invalid reply style")
         session_data = {
             key: value
             for key, value in item.items()
@@ -342,6 +384,21 @@ def save_sessions(path: Path, sessions: list[ChatSession]) -> None:
         path.chmod(0o600)
     except OSError:
         temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def export_chat(path: Path, chat_log: str) -> None:
+    """Write a chat transcript without overwriting an existing export."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with path.open("x", encoding="utf-8") as output:
+            created = True
+            output.write(chat_log)
+        path.chmod(0o600)
+    except OSError:
+        if created:
+            path.unlink(missing_ok=True)
         raise
 
 
@@ -417,10 +474,32 @@ def load_profiles(path: Path) -> ProfileStore:
                 or isinstance(profile.get("chat_log"), str)
             )
         ):
+            style = profile.get("style", "")
+            skills = profile.get("chat_skills", {})
+            preferred_model = profile.get("preferred_model", "")
+            character_development_enabled = profile.get(
+                "character_development_enabled", False
+            )
+            character_notes = profile.get("character_notes", "")
+            if (
+                not isinstance(style, str)
+                or not isinstance(skills, dict)
+                or not all(isinstance(skill, str) and isinstance(text, str) for skill, text in skills.items())
+                or not isinstance(preferred_model, str)
+                or not isinstance(character_development_enabled, bool)
+                or not isinstance(character_notes, str)
+                or len(character_notes) > MAX_CHARACTER_NOTES_LENGTH
+            ):
+                raise ValueError(f"Saved profile {name!r} in {path} has an invalid format")
             profiles[name] = ChatProfile(
                 player_name=profile["player_name"],
                 persona=profile["persona"],
                 chat_log=profile.get("chat_log", ""),
+                style=style,
+                chat_skills=skills,
+                preferred_model=preferred_model,
+                character_development_enabled=character_development_enabled,
+                character_notes=character_notes,
             )
     selected = raw.get("selected", "")
     if not isinstance(selected, str) or selected not in profiles:
@@ -440,6 +519,38 @@ def save_profiles(path: Path, store: ProfileStore) -> None:
     try:
         temporary_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.chmod(0o600)
+        temporary_path.replace(path)
+        path.chmod(0o600)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def load_setup_state(path: Path) -> SetupState:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return SetupState()
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read setup state at {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"Setup state at {path} must contain a JSON object")
+    completed = raw.get("completed", False)
+    preferred_model = raw.get("preferred_model", "")
+    if not isinstance(completed, bool) or not isinstance(preferred_model, str):
+        raise ValueError(f"Setup state at {path} has an invalid format")
+    return SetupState(completed=completed, preferred_model=preferred_model)
+
+
+def save_setup_state(path: Path, state: SetupState) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(asdict(state), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         temporary_path.chmod(0o600)
@@ -496,7 +607,7 @@ def request_json(
     access_token: str = "",
 ) -> dict[str, Any]:
     try:
-        status, result = transport.secure_request(
+        status, result = client_data.request(
             base_url,
             "POST" if payload is not None else "GET",
             endpoint,
@@ -568,6 +679,7 @@ def start_remote_session(
     password: str = "",
     style: str = "",
     skills: dict[str, str] | None = None,
+    account_token: str = "",
 ) -> dict[str, Any]:
     return request_json(
         base_url,
@@ -581,6 +693,7 @@ def start_remote_session(
             "AI_style": style,
             "AI_skills": skills or {},
         },
+        access_token=account_token,
     )
 
 
@@ -786,14 +899,14 @@ def parse_chat_log(chat_log: str) -> list[TranscriptMessage]:
         message_lines = []
 
     for line in chat_log.splitlines():
-        match = SPEAKER_LINE.match(line)
+        match = SPEAKER_LINE.match(line) if not line[:1].isspace() else None
         if match:
             save_message()
             speaker = match.group("speaker").strip()
             timestamp = match.group("timestamp")
             message_lines = [match.group("text") or ""]
         else:
-            message_lines.append(line)
+            message_lines.append(line[2:] if line.startswith("  ") else line)
     save_message()
     return messages
 
@@ -838,6 +951,9 @@ class ChatApp:
         self.sessions = load_sessions(data_file)
         self.active_index = len(self.sessions) - 1
         self.input_text = ""
+        self.input_cursor = 0
+        self.action_query = ""
+        self.session_hit_targets: list[tuple[int, int]] = []
         self.status = "Ready"
         self.scroll_offset = 0
         self.coding_scroll_offset = 0
@@ -845,16 +961,41 @@ class ChatApp:
         self.nav_help_visible = True
         self.active_tab = "Chat"
         self.view_mode = "chat"
+        self.account_access_token = ""
+        self.account_display_name = ""
+        self.knowledge_sources: list[dict[str, Any]] = []
         self.action_menu_visible = False
         self.action_menu_index = 0
         self.action_menu_items = (
-            ("Chat", "Switch to chat"),
-            ("Activity", "View session progress"),
-            ("Coding", "View coding task and agent"),
-            ("Review", "Review pending agent patch"),
-            ("Split", "Toggle chat and coding split"),
-            ("New session", "Create a conversation"),
-            ("Help", "Open command guide"),
+            ("Chat", "Conversation · F2"),
+            ("Data", "Your private knowledge · F3"),
+            ("Activity", "Live session progress · F4"),
+            ("Coding", "Task brief and agent output · F5"),
+            ("Review", "Inspect changes before applying · F6"),
+            ("Split", "Chat alongside coding · F7"),
+            ("New session", "Start a conversation · /new"),
+            ("Help", "All commands and shortcuts · /help"),
+            ("/login", "Join a session by ID"),
+            ("/account login", "Sign in to your local account"),
+            ("/account logout", "Sign out of your local account"),
+            ("/knowledge list", "Refresh your knowledge library"),
+            ("/knowledge add ", "Add a local file · enter its path"),
+            ("/code ", "Prepare a coding task · describe your request"),
+            ("/run", "Run your reviewed brief with the coding agent"),
+            ("/cancel", "Stop the coding agent"),
+            ("/diff", "Inspect a pending patch"),
+            ("/apply", "Apply the reviewed patch to your project"),
+            ("/discard", "Discard the isolated patch"),
+            ("/workspace", "Choose your project folder"),
+            ("/agent list", "Check available coding agents"),
+            ("/agent use ", "Choose copilot, claude, or codex"),
+            ("/style", "Change the reply style"),
+            ("/chatskill list", "Explore chat behaviours"),
+            ("/export", "Export this conversation to a local file"),
+            ("/connect", "Connect to a different server"),
+            ("/setup", "Set up your profile"),
+            ("/retry cancel", "Cancel a waiting message retry"),
+            ("/quit", "Close Super Bot"),
         )
         self.tab_hit_targets: list[tuple[str, int, int]] = []
         self.mouse_enabled = False
@@ -862,6 +1003,7 @@ class ChatApp:
         self.pending_kind = ""
         self.pending_session_data: tuple[str, str] | None = None
         self.pending_initial_chat_log: str | None = None
+        self.pending_profile_name = ""
         self.pending_message = ""
         self.pending_message_session_id: int | None = None
         self.pending_message_chat_context = ""
@@ -876,10 +1018,12 @@ class ChatApp:
         self.retry_due: float | None = None
         self.coding_data_path = data_file.with_name("coding_state.json")
         self.profiles_path = data_file.with_name("chat_profiles.json")
+        self.setup_state_path = data_file.with_name("setup_state.json")
         self.ui_preferences_path = data_file.with_name("ui_preferences.json")
         self.chat_skills_path = data_file.with_name("chat_skills.json")
         self.chat_skill_library = load_chat_skills(self.chat_skills_path)
         self.profile_store = load_profiles(self.profiles_path)
+        self.setup_state = load_setup_state(self.setup_state_path)
         self.ui_preferences = load_ui_preferences(self.ui_preferences_path)
         self.nav_help_visible = self.ui_preferences.show_navigation_help
         self.coding_state = coding_tools.load_coding_state(self.coding_data_path)
@@ -1060,29 +1204,19 @@ class ChatApp:
         except ValueError as exc:
             self.status = f"Error: {exc}"
             return False
-        if len(servers) == 1:
-            self.base_url = servers[0]
-            self.status = f"Discovered Super Bot server at {self.base_url}"
+        selected = self._choose_discovered_server(servers)
+        if selected is None:
+            self.status = "Server connection cancelled"
+            return False
+        if selected:
+            self.base_url = selected
+            self.status = f"Selected server {self.base_url}"
             return True
 
-        if servers:
-            choices = "; ".join(
-                f"{index + 1}: {url}" for index, url in enumerate(servers)
-            )
-            answer = self._prompt(
-                f"Choose server number ({choices}) or enter address",
-                title="LOGIN",
-            )
-            if answer.isdigit() and 1 <= int(answer) <= len(servers):
-                self.base_url = servers[int(answer) - 1]
-                self.status = f"Connected to {self.base_url}"
-                return True
-            address = answer
-        else:
-            address = self._prompt(
-                "Server address or IP (for example 192.168.1.20:8000)",
-                title="LOGIN",
-            )
+        address = self._prompt(
+            "HTTPS address, IP, or hostname (for example 192.168.1.20:8000)",
+            title="MANUAL SERVER ADDRESS",
+        )
 
         try:
             server_url = normalize_server_url(address)
@@ -1093,8 +1227,128 @@ class ChatApp:
             self.status = "Server connection cancelled"
             return False
         self.base_url = server_url
-        self.status = f"Using server {self.base_url}"
+        self.status = f"Selected manual server {self.base_url}"
         return True
+
+    def _choose_discovered_server(self, servers: list[str]) -> str | None:
+        """Return a chosen address, an empty manual-selection marker, or None."""
+        selected = 0
+        options = [*servers, ""]
+        feedback = ""
+        self.screen.timeout(-1)
+        try:
+            while True:
+                height, width = self.screen.getmaxyx()
+                self.screen.erase()
+                self._put(
+                    0,
+                    2,
+                    " SUPER BOT  /  CONNECT ",
+                    curses.A_BOLD | self._color(1),
+                )
+                self._put(
+                    2,
+                    2,
+                    "Choose a server discovered on your local network.",
+                )
+                self._put(
+                    3,
+                    2,
+                    "Or choose Manual address for a server outside this network.",
+                    curses.A_DIM,
+                )
+                self._put(5, 2, " DISCOVERED SERVERS ", curses.A_BOLD | self._color(2))
+                row = 6
+                if servers:
+                    for index, server in enumerate(servers):
+                        marker = "> " if index == selected else "  "
+                        self._put(
+                            row,
+                            3,
+                            f"{marker}{server}"[: max(1, width - 6)],
+                            curses.A_REVERSE if index == selected else 0,
+                        )
+                        row += 1
+                else:
+                    self._put(row, 3, "No local servers found.", curses.A_DIM)
+                    row += 1
+                row = min(row + 1, height - 4)
+                self._put(row, 2, " OTHER SERVER ", curses.A_BOLD | self._color(3))
+                manual_index = len(servers)
+                marker = "> " if selected == manual_index else "  "
+                self._put(
+                    row + 1,
+                    3,
+                    f"{marker}Manual address  ·  enter an HTTPS hostname or IP",
+                    curses.A_REVERSE if selected == manual_index else 0,
+                )
+                self._put(
+                    height - 2,
+                    2,
+                    "↑/↓ Select  ·  Enter Connect  ·  / Command  ·  Esc Back",
+                    curses.A_DIM,
+                )
+                if feedback:
+                    self._put(height - 1, 2, feedback)
+                self.screen.refresh()
+                key = self.screen.get_wch()
+                if key in (curses.KEY_UP, "k"):
+                    selected = (selected - 1) % len(options)
+                elif key in (curses.KEY_DOWN, "j"):
+                    selected = (selected + 1) % len(options)
+                elif key in ("\n", "\r", curses.KEY_ENTER):
+                    return options[selected]
+                elif key == "/":
+                    try:
+                        command = self._prompt(
+                            "Command: /connect ADDRESS, /server forget, /refresh, /help, /cancel",
+                            title="SERVER COMMAND",
+                        ).strip().removeprefix("/")
+                    finally:
+                        self.screen.timeout(-1)
+                    action, _, argument = command.partition(" ")
+                    action = action.casefold()
+                    argument = argument.strip()
+                    if action == "connect":
+                        if not argument:
+                            return ""
+                        try:
+                            return normalize_server_url(argument)
+                        except ValueError as exc:
+                            feedback = str(exc)
+                    elif action == "server" and argument.casefold() == "forget":
+                        url = options[selected]
+                        if not url:
+                            feedback = "Highlight a discovered server before using /server forget."
+                        else:
+                            try:
+                                forgotten = transport.trust_store().forget(url)
+                            except transport.TransportError as exc:
+                                feedback = str(exc)
+                            else:
+                                feedback = (
+                                    "Forgot server trust. Verify its fingerprints on reconnect."
+                                    if forgotten else "This server has no saved trust."
+                                )
+                    elif action == "refresh" and not argument:
+                        try:
+                            servers = discover_servers()
+                        except ValueError as exc:
+                            feedback = str(exc)
+                        else:
+                            options = [*servers, ""]
+                            selected = 0
+                            feedback = f"Found {len(servers)} local server(s)."
+                    elif action == "cancel" and not argument:
+                        return None
+                    elif command:
+                        feedback = "Commands: /connect ADDRESS, /server forget, /refresh, /help, /cancel"
+                elif key == "\x1b":
+                    return None
+        except curses.error:
+            return None
+        finally:
+            self.screen.timeout(100)
 
     def _start_session_events(self) -> None:
         self._stop_session_events()
@@ -1170,8 +1424,29 @@ class ChatApp:
                 if participant_id == self._active_participant_id():
                     self.message_progress = self._format_progress(phase, event.get("detail", ""))
             elif event_type == "message":
+                if self.future is not None and self.pending_kind in {"message", "message_retry", "login", "new"}:
+                    # The network worker holds the client session lock. Leave
+                    # live exchanges queued rather than blocking the UI on it.
+                    self.session_events.put(event)
+                    return
                 session = self.active_session
-                chat_log = event.get("chat_log")
+                chat_log = None
+                if session is not None:
+                    try:
+                        chat_log = client_data.local_history(
+                            session.server_url or self.base_url,
+                            session.server_session_id,
+                            event,
+                        )
+                    except (OSError, client_data.database.DatabaseError) as exc:
+                        self.status = f"Error saving shared chat update: {exc}"
+                        continue
+                    if chat_log is None:
+                        # Legacy clients may not yet have a client.db record.
+                        # Never replace their complete history with a bounded tail.
+                        incoming = event.get("chat_log")
+                        if isinstance(incoming, str) and incoming.startswith(session.chat_log):
+                            chat_log = incoming
                 if (
                     session is not None
                     and isinstance(chat_log, str)
@@ -1183,9 +1458,10 @@ class ChatApp:
                     except OSError as exc:
                         self.status = f"Error saving shared chat update: {exc}"
                     else:
-                        self.status = (
-                            f"{event.get('player_name', 'A client')} sent a message"
-                        )
+                        if self._sync_profile_chat_log(session):
+                            self.status = (
+                                f"{event.get('player_name', 'A client')} sent a message"
+                            )
             elif event_type == "joined":
                 self.status = f"{event.get('player_name', 'A client')} joined this session"
             elif event_type == "error":
@@ -1193,13 +1469,11 @@ class ChatApp:
 
     def _startup_login(self) -> bool:
         while not self.closed:
-            session_text = self._prompt(
-                "Session ID to log in (or type NEW to create a session)",
-                title="LOGIN",
-            )
-            if not session_text:
+            login = self._login_form()
+            if login is None:
                 self.status = "Login cancelled"
                 return False
+            session_text, password = login
             if session_text.casefold() == "new":
                 self.create_session()
                 self._wait_for_startup_request()
@@ -1209,7 +1483,6 @@ class ChatApp:
                 continue
 
             session_id = int(session_text)
-            password = self._prompt("Session password (leave blank if none)", secret=True, title="LOGIN")
             self.status = f"Authenticating to server session {session_id}…"
             self.pending_kind = "login"
             self.pending_session_data = (str(session_id), "")
@@ -1223,6 +1496,88 @@ class ChatApp:
             if self.active_session is not None:
                 return True
         return False
+
+    def _login_form(self) -> tuple[str, str] | None:
+        """Start a new chat or join one, keeping its password in memory only."""
+        session_id = ""
+        password = ""
+        field = 0
+        self.screen.timeout(-1)
+        try:
+            while True:
+                height, width = self.screen.getmaxyx()
+                self.screen.erase()
+                if height < 12 or width < 40:
+                    self._put(0, 0, "Resize to 40 × 12 · Esc to close")
+                    self.screen.refresh()
+                    if self.screen.get_wch() in ("\x1b", "\x03"):
+                        return None
+                    continue
+                panel_width = min(72, width - 4)
+                left = (width - panel_width) // 2
+                top = max(1, (height - 17) // 2)
+                self._put(top, left + 2, "SUPER BOT", curses.A_BOLD | self._color(1))
+                self._put(top + 1, left + 2, "Start a conversation", curses.A_BOLD)
+                compact = height < 18
+                if not compact:
+                    self._put(top + 3, left + 2, tui.clip("Enter starts a new chat. To join, enter a session ID.", panel_width - 4), curses.A_DIM)
+                first_row = top + (3 if compact else 5)
+                second_row = first_row + (2 if compact else 4)
+                for number, (label, value, row) in enumerate((
+                    ("Session ID", session_id, first_row),
+                    ("Password · optional", "*" * len(password), second_row),
+                )):
+                    attr = self._color(1) if field == number else self._color(5)
+                    if not compact:
+                        self._box(row, left, 3, panel_width, attr)
+                        self._put(row, left + 2, " " + label + " ", attr)
+                    else:
+                        self._put(row, left + 2, label, attr)
+                    placeholder = "NEW · press Enter to start" if number == 0 else "Leave blank if the session has no password"
+                    visible, _ = tui.editor_view(value, len(value), panel_width - 6)
+                    self._put(row + 1, left + 3, tui.clip(visible or placeholder, panel_width - 6), curses.A_BOLD if value else curses.A_DIM)
+                status_row = height - 3
+                status = self.status if self.status.startswith("Error:") else "History stays on this device. Server context is temporary."
+                self._put(status_row, left, tui.clip(status, panel_width), self._color(4) if self.status.startswith("Error:") else self._color(5))
+                self._put(height - 2, left, tui.clip("Enter continue · Tab switch field · Esc quit", panel_width), curses.A_DIM)
+                cursor_value = session_id if field == 0 else password
+                _, cursor = tui.editor_view(cursor_value, len(cursor_value), panel_width - 6)
+                try:
+                    curses.curs_set(1)
+                    self.screen.move((first_row if field == 0 else second_row) + 1, left + 3 + cursor)
+                except curses.error:
+                    pass
+                self.screen.refresh()
+                key = self.screen.get_wch()
+                if key in ("\x1b", "\x03"):
+                    return None
+                if key in ("\t", curses.KEY_UP, curses.KEY_DOWN, curses.KEY_BTAB):
+                    field = 1 - field
+                elif key in ("\n", "\r", curses.KEY_ENTER):
+                    if not session_id.strip() or session_id.strip().casefold() == "new":
+                        return "NEW", ""
+                    if field == 0:
+                        field = 1
+                    else:
+                        return session_id.strip(), password
+                elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+                    if field == 0:
+                        session_id = session_id[:-1]
+                    else:
+                        password = password[:-1]
+                elif isinstance(key, str) and key.isprintable():
+                    if field == 0 and len(session_id) < 20:
+                        session_id += key
+                    elif field == 1 and len(password) < 128:
+                        password += key
+        except curses.error:
+            return None
+        finally:
+            self.screen.timeout(100)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
 
     def _wait_for_startup_request(self) -> None:
         while self.future is not None:
@@ -1250,23 +1605,98 @@ class ChatApp:
         except OSError as exc:
             self.status = f"Error saving UI preferences: {exc}"
 
+    def _save_setup_state(self) -> bool:
+        try:
+            save_setup_state(self.setup_state_path, self.setup_state)
+        except OSError as exc:
+            self.status = f"Error saving setup state: {exc}"
+            return False
+        return True
+
+    def _run_setup_wizard(self) -> None:
+        """Create a safe local profile on first use; provider credentials stay server-side."""
+        if self.setup_state.completed:
+            return
+        start = self._confirm_lines(
+            "SETUP WIZARD",
+            [
+                "Set up a local profile for new chats.",
+                "Your selected model is a preference only: the server owner configures "
+                "the actual provider and keeps API keys private.",
+                "Character notes are opt-in local context for future sessions; Super Bot "
+                "does not learn from chats automatically.",
+            ],
+            "Start setup? [y/N] ",
+            1,
+        )
+        if not start:
+            self.setup_state.completed = True
+            self._save_setup_state()
+            self.status = "Setup skipped. Run /setup later to create a profile."
+            return
+
+        profile_name = self._prompt("Profile name", title="SETUP WIZARD")
+        player_name = self._prompt("Player name", title="SETUP WIZARD")
+        persona = self._prompt("AI persona", title="SETUP WIZARD")
+        if not profile_name or not player_name or not persona:
+            self.status = "Setup cancelled; no profile was saved."
+            return
+        model_prompt = (
+            "Preferred model: 1) Super Bot Chatter (local), "
+            "2) existing local model, 3) Gemini (server configured)"
+        )
+        choice = self._prompt(model_prompt, title="SETUP WIZARD")
+        selected_model = MODEL_CHOICES[int(choice) - 1] if choice in {"1", "2", "3"} else ""
+        if choice and not selected_model:
+            self.status = "Setup cancelled: model choice must be 1, 2, or 3."
+            return
+        character_notes = self._prompt(
+            "Optional character notes (blank disables character development)",
+            title="SETUP WIZARD",
+        )
+        if len(character_notes) > MAX_CHARACTER_NOTES_LENGTH:
+            self.status = (
+                f"Setup cancelled: character notes must be at most "
+                f"{MAX_CHARACTER_NOTES_LENGTH} characters."
+            )
+            return
+        self.profile_store.profiles[profile_name] = ChatProfile(
+            player_name=player_name,
+            persona=persona,
+            preferred_model=selected_model,
+            character_development_enabled=bool(character_notes),
+            character_notes=character_notes,
+        )
+        self.profile_store.selected = profile_name
+        self.setup_state = SetupState(completed=True, preferred_model=selected_model)
+        if self._save_profile_store() and self._save_setup_state():
+            self.status = f"Setup complete. Selected profile: {profile_name}."
+
     def _setup_screen(self) -> None:
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         self.screen.keypad(True)
         self.screen.timeout(100)
         try:
-            self.mouse_enabled = bool(
-                curses.mousemask(curses.ALL_MOUSE_EVENTS)[0]
-            )
+            self.mouse_enabled = bool(curses.mousemask(curses.ALL_MOUSE_EVENTS)[0])
         except curses.error:
             self.mouse_enabled = False
         if curses.has_colors():
             curses.start_color()
-            curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_CYAN, -1)
-            curses.init_pair(2, curses.COLOR_GREEN, -1)
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)
-            curses.init_pair(4, curses.COLOR_RED, -1)
+            background = -1
+            try:
+                curses.use_default_colors()
+            except curses.error:
+                background = curses.COLOR_BLACK
+            # Muted teal, mint, amber and coral on the terminal's own background.
+            colors = (81, 114, 221, 210, 245, 153) if curses.COLORS >= 256 else (
+                curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW,
+                curses.COLOR_RED, curses.COLOR_WHITE, curses.COLOR_BLUE,
+            )
+            for pair, foreground in enumerate(colors, 1):
+                curses.init_pair(pair, foreground, background)
 
     @property
     def active_session(self) -> ChatSession | None:
@@ -1278,6 +1708,8 @@ class ChatApp:
         try:
             if not self.base_url and not self._connect_to_server():
                 return
+            if hasattr(self, "setup_state"):
+                self._run_setup_wizard()
             if not self._startup_login():
                 return
             while not self.closed:
@@ -1293,6 +1725,7 @@ class ChatApp:
                     continue
                 self.handle_key(key)
         finally:
+            client_data.close_all()
             self._stop_session_events()
             if self.agent_process is not None:
                 self.agent_process.cancel()
@@ -1303,244 +1736,212 @@ class ChatApp:
     def draw(self) -> None:
         self.screen.erase()
         height, width = self.screen.getmaxyx()
-        if height < 12 or width < 50:
-            self._put(0, 0, "Resize the terminal to at least 50 columns by 12 rows.")
+        self.session_hit_targets = []
+        self.tab_hit_targets = []
+        if height < 12 or width < 40:
+            self._put(0, 0, "Super Bot · resize to 40 × 12", curses.A_BOLD)
+            self._put(2, 0, "Your draft is kept. Ctrl+C exits.", curses.A_DIM)
             self.screen.refresh()
             return
 
-        self._put(0, 2, " SUPER BOT ", curses.A_BOLD | self._color(1))
         session = self.active_session
-        if session is None:
-            subtitle = "No session selected"
-        else:
-            subtitle = (
-                f"{session.player_name}  ·  session {session.server_session_id}  "
-                f"·  {self.active_index + 1}/{len(self.sessions)}"
-            )
-        if self.help_visible:
-            subtitle = "Command guide  ·  ↑/↓ scroll  ·  Esc close"
-        elif self.agent_process is not None:
-            subtitle += f"  ·  {self.coding_state.provider} agent running"
-        if (
-            not self.help_visible
-            and (
-                self.coding_state.plan_status != "idle"
-                or self.coding_state.job_status != "idle"
-            )
-        ):
-            subtitle += (
-                f"  ·  Coding {self.coding_state.plan_status}"
-                f" / agent {self.coding_state.job_status}"
-            )
-        self._put(1, 2, subtitle, self._color(1))
+        self._put(0, 2, "SUPER BOT", curses.A_BOLD | self._color(1))
+        self._put(0, 13, " / " + ("Command guide" if self.help_visible else self.active_tab), curses.A_DIM)
+        badge = "LOCAL HISTORY"
+        if width >= 64:
+            self._put(0, width - len(badge) - 3, badge, self._color(2))
+        subtitle = (
+            f"{session.player_name} · Session {session.server_session_id}"
+            if session else "Your space to talk, build, and explore"
+        )
+        if self.coding_only_mode:
+            subtitle = f"Coding directly with {self.coding_state.provider} · {self.workspace.name}"
+        self._put(1, 2, tui.clip(subtitle, width - 4), self._color(5))
         self._draw_tabs(width)
-        self._put(3, 1, "─" * (width - 2), curses.A_DIM)
+        self._put(3, 1, "─" * (width - 2), self._color(5))
 
         body_top = 4
-        footer_top = height - (6 if self.nav_help_visible else 5)
+        show_extra_hints = self.nav_help_visible and height >= 18
+        footer_top = height - (7 if show_extra_hints else 6)
         body_height = max(1, footer_top - body_top)
+        sidebar = width >= 110 and self.view_mode != "split" and not self.help_visible
+        left = 31 if sidebar else 3
+        content_width = width - left - 3
+        if sidebar:
+            self._draw_sidebar(body_top, body_height, 27)
+            for row in range(body_top, footer_top):
+                self._put(row, 28, "│", self._color(5))
         if self.help_visible:
-            lines = [
-                [(line, "normal")]
-                for line in self._wrapped_lines(HELP_TEXT, width - 6)
-            ]
-            self.scroll_offset = min(self.scroll_offset, max(0, len(lines) - body_height))
-            end = max(0, len(lines) - self.scroll_offset)
-            start = max(0, end - body_height)
-            for row, line in enumerate(lines[start:end], start=body_top):
-                self._draw_rich_line(row, 3, line, width - 6)
-        elif self.action_menu_visible:
-            pass
+            lines = [[(line, "normal")] for line in HELP_TEXT.splitlines()]
+            self._draw_panel(lines, body_top, left, body_height, content_width, "scroll_offset")
         elif self.active_tab == "Chat" and self.view_mode == "split" and width >= 90:
-            column_width = (width - 5) // 2
-            content_top = body_top + 1
-            content_height = max(1, body_height - 1)
-            self._put(body_top, 2, " CONVERSATION ", curses.A_BOLD | self._color(1))
-            self._put(
-                body_top,
-                column_width + 3,
-                " CODING ACTIVITY ",
-                curses.A_BOLD | self._color(2),
-            )
-            separator_x = column_width + 1
-            for row in range(content_top, footer_top):
-                self._put(row, separator_x, "│", curses.A_DIM)
-            chat_lines = self._chat_panel_lines(column_width - 3)
-            coding_lines = self._coding_panel_lines(column_width - 3)
-            self.scroll_offset = min(
-                self.scroll_offset, max(0, len(chat_lines) - content_height)
-            )
-            self.coding_scroll_offset = min(
-                self.coding_scroll_offset, max(0, len(coding_lines) - content_height)
-            )
-            chat_end = max(0, len(chat_lines) - self.scroll_offset)
-            coding_end = max(0, len(coding_lines) - self.coding_scroll_offset)
-            for row, line in enumerate(
-                chat_lines[max(0, chat_end - content_height) : chat_end],
-                content_top,
-            ):
-                self._draw_rich_line(row, 2, line, column_width - 3)
-            for row, line in enumerate(
-                coding_lines[max(0, coding_end - content_height) : coding_end],
-                content_top,
-            ):
-                self._draw_rich_line(
-                    row,
-                    column_width + 3,
-                    line,
-                    width - column_width - 5,
-                )
-        elif self.active_tab == "Coding":
-            lines = self._coding_panel_lines(width - 6)
-            self.coding_scroll_offset = min(
-                self.coding_scroll_offset, max(0, len(lines) - body_height)
-            )
-            end = max(0, len(lines) - self.coding_scroll_offset)
-            start = max(0, end - body_height)
-            for row, line in enumerate(lines[start:end], start=body_top):
-                self._draw_rich_line(row, 3, line, width - 6)
-        elif self.active_tab == "Activity":
-            lines = self._activity_panel_lines()
-            self.scroll_offset = min(
-                self.scroll_offset, max(0, len(lines) - body_height)
-            )
-            end = max(0, len(lines) - self.scroll_offset)
-            start = max(0, end - body_height)
-            for row, line in enumerate(lines[start:end], start=body_top):
-                self._draw_rich_line(row, 3, line, width - 6)
-        elif self.active_tab == "Review":
-            lines = self._review_panel_lines()
-            self.coding_scroll_offset = min(
-                self.coding_scroll_offset, max(0, len(lines) - body_height)
-            )
-            end = max(0, len(lines) - self.coding_scroll_offset)
-            start = max(0, end - body_height)
-            for row, line in enumerate(lines[start:end], start=body_top):
-                self._draw_rich_line(row, 3, line, width - 6)
+            column_width = (width - 7) // 2
+            self._put(body_top, 3, "CONVERSATION", curses.A_BOLD | self._color(1))
+            self._put(body_top, column_width + 6, "CODING ACTIVITY", curses.A_BOLD | self._color(2))
+            for row in range(body_top, footer_top):
+                self._put(row, column_width + 4, "│", self._color(5))
+            self._draw_panel(self._chat_panel_lines(column_width), body_top + 1, 3,
+                             body_height - 1, column_width, "scroll_offset")
+            self._draw_panel(self._coding_panel_lines(column_width), body_top + 1,
+                             column_width + 6, body_height - 1, column_width,
+                             "coding_scroll_offset")
         else:
-            lines = self._chat_panel_lines(width - 6)
-            self.scroll_offset = min(self.scroll_offset, max(0, len(lines) - body_height))
-            end = max(0, len(lines) - self.scroll_offset)
-            start = max(0, end - body_height)
-            for row, line in enumerate(lines[start:end], start=body_top):
-                self._draw_rich_line(row, 3, line, width - 6)
+            panels = {
+                "Chat": lambda: self._chat_panel_lines(content_width),
+                "Coding": lambda: self._coding_panel_lines(content_width),
+                "Activity": self._activity_panel_lines,
+                "Data": lambda: self._data_panel_lines(content_width),
+                "Review": self._review_panel_lines,
+            }
+            offset = "coding_scroll_offset" if self.active_tab in {"Coding", "Review"} else "scroll_offset"
+            self._draw_panel(panels[self.active_tab](), body_top, left, body_height,
+                             content_width, offset)
 
-        self._put(footer_top, 1, "─" * (width - 2), curses.A_DIM)
-        status_row = footer_top + 1
-        message_status = self.message_progress
-        if self.future is not None and self.pending_kind in {"message", "message_retry"}:
-            message_status = self.message_progress or "Waiting for reply…"
-        showing_progress = self.ui_preferences.show_progress and bool(message_status)
-        if showing_progress:
-            status_color = (
-                self._color(4)
-                if message_status.startswith(("Request failed", "Error"))
-                else self._color(3)
-            )
-            self._put(status_row, 2, "● " + message_status, status_color)
-        else:
-            status_attr = (
-                self._color(4)
-                if self.status.startswith("Error:")
-                else self._color(3)
-            )
-            status = (
-                "Help is open; press Esc to close"
-                if self.help_visible
-                else self.status
-            )
-            self._put(status_row, 2, status, status_attr)
-        input_row = footer_top + 2
-        input_label = " TASK > " if self.coding_only_mode else " MESSAGE > "
-        self._put(input_row, 2, input_label, curses.A_BOLD | self._color(2))
-        self._put(input_row, 2 + len(input_label), self.input_text, curses.A_BOLD)
+        progress = self.message_progress if self.ui_preferences.show_progress else ""
+        busy = self.future is not None or self.coding_future is not None or self.agent_process is not None
+        status = progress or self.status
         if self.help_visible:
-            hint = "Esc: close guide · Up/Down: scroll"
-        elif self.coding_only_mode:
-            hint = "Enter: send task · Ctrl+P: actions · F1: hints"
-        elif self.active_session is None:
-            hint = "/new: create · /login: join · Ctrl+P: actions"
-        elif self.nav_help_visible:
-            hint = "Tab/←/→: views · Ctrl+P: actions · F1: hide hints"
-        else:
-            hint = "Enter: send · /help: commands · F1: show hints"
-        self._put(footer_top + 3, 2, hint, curses.A_DIM)
-        if showing_progress:
-            self._put(footer_top + 4, 2, self.status, curses.A_DIM)
+            status = "Command guide · Esc returns to your conversation"
+        failed = status.casefold().startswith(("error", "request failed", "failed"))
+        marker = "! " if failed else ("◐◓◑◒"[int(time.monotonic() * 5) % 4] + " " if busy else "● ")
+        self._put(footer_top, 2, tui.clip(marker + status, width - 4, True), self._color(4 if failed else 3 if busy else 2))
+
+        label = "Command" if self.input_text.startswith("/") else "Task" if self.coding_only_mode else "Message"
+        limit = 4000 if self.coding_only_mode else 1000
+        count = str(len(self.input_text)) if label == "Command" else f"{len(self.input_text)}/{limit}"
+        self._box(footer_top + 1, 1, 3, width - 2, self._color(1))
+        self._put(footer_top + 1, 3, f" {label} ", curses.A_BOLD | self._color(1))
+        self._put(footer_top + 1, width - len(count) - 5, f" {count} ", self._color(4) if label != "Command" and len(self.input_text) > limit else self._color(5))
+        input_row = footer_top + 2
+        self.input_cursor = min(getattr(self, "input_cursor", len(self.input_text)), len(self.input_text))
+        visible, cursor = tui.editor_view(self.input_text, self.input_cursor, width - 8)
+        self._put(input_row, 3, "›", self._color(1))
+        placeholder = "Describe your coding task…" if self.coding_only_mode else "Write a message, or / for commands…"
+        self._put(input_row, 5, visible or tui.clip(placeholder, width - 8), 0 if visible else curses.A_DIM)
+        hint = "Enter send  ·  Ctrl+P actions  ·  Ctrl+O chats"
+        if self.help_visible:
+            hint = "↑ ↓ scroll  ·  Home top  ·  Esc close"
+        elif self.action_menu_visible:
+            hint = "Type to search  ·  ↑ ↓ select  ·  Enter choose"
+        elif self.active_tab == "Review":
+            hint = "Ctrl+A apply  ·  Ctrl+D discard  ·  Ctrl+P actions"
+        elif self.input_text.startswith("/"):
+            hint = "Tab find command  ·  Enter run  ·  Ctrl+U clear"
+        if width < 60:
+            hint = "Esc close · ↑ ↓ scroll" if self.help_visible else "Enter select · Esc close" if self.action_menu_visible else "Enter send · Ctrl+P actions"
+        self._put(footer_top + 4, 2, tui.clip(hint, width - 4), curses.A_DIM)
+        if show_extra_hints:
+            self._put(footer_top + 5, 2, tui.clip("Tab views  ·  PgUp/PgDn scroll  ·  F1 hints  ·  Ctrl+C quit", width - 4), curses.A_DIM)
         if self.action_menu_visible:
             self._draw_action_menu(1, height - 2, width)
-        cursor_x = min(width - 2, 2 + len(input_label) + len(self.input_text))
-        if not self.future and not self.action_menu_visible:
-            try:
-                curses.curs_set(1)
-                self.screen.move(input_row, cursor_x)
-            except curses.error:
-                pass
-        else:
-            curses.curs_set(0)
+        try:
+            curses.curs_set(0 if self.action_menu_visible or self.help_visible else 1)
+            if not self.action_menu_visible and not self.help_visible:
+                self.screen.move(input_row, min(width - 3, 5 + cursor))
+        except curses.error:
+            pass
         self.screen.refresh()
+
+    def _box(self, top: int, left: int, height: int, width: int, attr: int = 0) -> None:
+        if height < 2 or width < 2:
+            return
+        self._put(top, left, "╭" + "─" * (width - 2) + "╮", attr)
+        for row in range(top + 1, top + height - 1):
+            self._put(row, left, "│", attr)
+            self._put(row, left + width - 1, "│", attr)
+        self._put(top + height - 1, left, "╰" + "─" * (width - 2) + "╯", attr)
+
+    def _draw_panel(self, lines: list[list[tuple[str, str]]], top: int, left: int,
+                    height: int, width: int, offset_name: str) -> None:
+        if height < 1:
+            return
+        wrapped = [part for line in lines for part in self._wrap_rich_segments(line, max(1, width - 1))]
+        while wrapped and not any(text.strip() for text, _ in wrapped[-1]):
+            wrapped.pop()
+        offset = min(getattr(self, offset_name), max(0, len(wrapped) - height))
+        setattr(self, offset_name, offset)
+        end = max(0, len(wrapped) - offset)
+        start = max(0, end - height)
+        for row, line in enumerate(wrapped[start:end], top):
+            self._draw_rich_line(row, left, line, width - 1)
+        if len(wrapped) > height:
+            thumb = max(1, height * height // len(wrapped))
+            position = (height - thumb) * start // max(1, len(wrapped) - height)
+            for row in range(height):
+                self._put(top + row, left + width - 1, "┃" if position <= row < position + thumb else "│", self._color(1) if position <= row < position + thumb else self._color(5))
+
+    def _draw_sidebar(self, top: int, height: int, width: int) -> None:
+        self._put(top, 2, "CONVERSATIONS", curses.A_BOLD | self._color(5))
+        if height < 4:
+            return
+        self._put(top + 1, 2, "+ New conversation", self._color(1))
+        self.session_hit_targets.append((top + 1, -1))
+        available = max(0, (height - 7) // 3)
+        first = max(0, min(self.active_index - available // 2, len(self.sessions) - available))
+        for index in range(first, min(len(self.sessions), first + available)):
+            session = self.sessions[index]
+            row = top + 3 + (index - first) * 3
+            selected = index == self.active_index
+            title = f"{'›' if selected else ' '} {index + 1}. {session.player_name}"
+            attr = curses.A_BOLD | self._color(1) if selected else 0
+            self._put(row, 1, tui.pad(tui.clip(title, width - 2, True), width - 1), attr | (curses.A_REVERSE if selected else 0))
+            self._put(row + 1, 4, tui.clip(session.persona or "Conversation", width - 5, True), curses.A_DIM)
+            self.session_hit_targets.extend(((row, index), (row + 1, index)))
+        if not self.sessions and available:
+            self._put(top + 3, 2, "Your chats appear here.", curses.A_DIM)
+        if height >= 7:
+            self._put(top + height - 3, 2, "Ctrl+O  All conversations", self._color(5))
+            self._put(top + height - 2, 2, tui.clip(self.workspace.name, width - 3, True), curses.A_DIM)
+            self._put(top + height - 1, 2, tui.clip(f"Agent · {self.coding_state.provider}", width - 3), self._color(2))
 
     def _draw_tabs(self, width: int) -> None:
         self.tab_hit_targets = []
         column = 2
-        for tab in TABS:
-            label = f"[ {tab} ]" if tab == self.active_tab else f"  {tab}  "
-            attr = curses.A_BOLD | self._color(1 if tab == self.active_tab else 3)
+        for index, tab in enumerate(TABS):
+            name = {"Activity": "Live", "Coding": "Code", "Review": "Diff"}.get(tab, tab) if width < 55 else tab
+            label = f" {name}" + (f" F{index + 2} " if width >= 76 else " ")
+            selected = tab == self.active_tab
+            attr = curses.A_BOLD | self._color(1) | curses.A_REVERSE if selected else self._color(5)
             self._put(2, column, label, attr)
             self.tab_hit_targets.append((tab, column, column + len(label)))
             column += len(label) + 1
-            if column >= width - 2:
-                break
+
+    def _filtered_actions(self) -> list[tuple[str, str]]:
+        items = list(self.action_menu_items)
+        items.extend((f"/open {index + 1}", f"Conversation · {session.player_name} · {session.persona[:80]}")
+                     for index, session in enumerate(self.sessions))
+        words = getattr(self, "action_query", "").casefold().split()
+        return [(name, description) for name, description in items
+                if all(word in (name + " " + description).casefold() for word in words)]
+
+    def _open_actions(self, query: str = "") -> None:
+        self.action_query = query
+        self.action_menu_index = 0
+        self.action_menu_visible = True
 
     def _draw_action_menu(self, top: int, body_height: int, width: int) -> None:
-        menu_width = min(50, width - 8)
-        left = max(2, (width - menu_width) // 2)
-        menu_height = min(len(self.action_menu_items) + 4, body_height)
-        menu_top = top + max(0, (body_height - menu_height) // 2)
-        visible_count = max(1, menu_height - 4)
-        first_item = max(
-            0,
-            min(
-                self.action_menu_index,
-                len(self.action_menu_items) - visible_count,
-            ),
-        )
-        self._put(menu_top, left, "┌" + "─" * (menu_width - 2) + "┐", self._color(1))
-        self._put(
-            menu_top + 1,
-            left + 2,
-            " ACTIONS ",
-            curses.A_BOLD | self._color(1),
-        )
-        visible_items = self.action_menu_items[
-            first_item : first_item + visible_count
-        ]
-        for offset, (name, description) in enumerate(visible_items):
-            index = first_item + offset
-            row = menu_top + 2 + offset
-            if row >= menu_top + menu_height - 1:
-                break
-            selected = index == self.action_menu_index
-            marker = "> " if selected else "  "
-            text = f"{marker}{name:<14} {description}"
-            self._put(
-                row,
-                left + 1,
-                text[: menu_width - 2],
-                curses.A_REVERSE if selected else 0,
-            )
-        self._put(
-            menu_top + menu_height - 2,
-            left + 2,
-            "Up/Down move · Enter select · Esc close",
-            curses.A_DIM,
-        )
-        self._put(
-            menu_top + menu_height - 1,
-            left,
-            "└" + "─" * (menu_width - 2) + "┘",
-            self._color(1),
-        )
+        items = self._filtered_actions()
+        menu_width = min(76, width - 4)
+        left = (width - menu_width) // 2
+        menu_height = min(max(1, len(items)) + 6, body_height)
+        menu_top = top + max(0, (body_height - menu_height) // 3)
+        for row in range(menu_top, menu_top + menu_height):
+            self._put(row, left, " " * menu_width)
+        self._box(menu_top, left, menu_height, menu_width, self._color(1))
+        self._put(menu_top, left + 2, " QUICK ACTIONS ", curses.A_BOLD | self._color(1))
+        self._put(menu_top + 1, left + 2, tui.clip("› " + (self.action_query or "Search actions, commands, conversations…"), menu_width - 4), 0 if self.action_query else curses.A_DIM)
+        self._put(menu_top + 2, left + 1, "─" * (menu_width - 2), self._color(5))
+        visible_count = max(1, menu_height - 6)
+        self.action_menu_index = min(self.action_menu_index, max(0, len(items) - 1))
+        first = max(0, self.action_menu_index - visible_count + 1)
+        for offset, (name, description) in enumerate(items[first:first + visible_count]):
+            selected = first + offset == self.action_menu_index
+            name_width = min(22, (menu_width - 6) // 2)
+            text = ("› " if selected else "  ") + tui.pad(tui.clip(name, name_width, True), name_width) + "  " + description
+            self._put(menu_top + 3 + offset, left + 1, tui.pad(tui.clip(text, menu_width - 2), menu_width - 2), curses.A_REVERSE | curses.A_BOLD if selected else 0)
+        if not items:
+            self._put(menu_top + 3, left + 3, "No matches. Try another word.", self._color(3))
+        self._put(menu_top + menu_height - 2, left + 2, tui.clip("↑ ↓ choose · Enter select · Esc close", menu_width - 4), curses.A_DIM)
 
     def _chat_panel_lines(self, width: int) -> list[list[tuple[str, str]]]:
         session = self.active_session
@@ -1568,7 +1969,12 @@ class ChatApp:
                 *self._transcript_lines(preview, width - 2),
             ]
         if session is not None and session.chat_log:
-            return self._transcript_lines(session, width - 2)
+            lines = self._transcript_lines(session, width - 2)
+            if self.pending_message and self.pending_message_session_id == session.server_session_id:
+                lines.append([("● You · sending", "player")])
+                lines.extend(self._wrap_rich_segments([(self.pending_message, "dim")], width - 2))
+                lines.append([("  Waiting for Super Bot…", "dim")])
+            return lines
         if session is None and selected_profile is not None:
             if selected_profile.chat_log:
                 return [
@@ -1582,9 +1988,16 @@ class ChatApp:
                     [("Describe a coding task below and press Enter.", "dim")],
                 ]
             return [
-                [("No conversation selected.", "player")],
-                [("Press Ctrl+P and choose New session.", "dim")],
-                [("Or enter /new to create or /login to join.", "dim")],
+                [("Welcome to your workspace", "player")],
+                [("", "normal")],
+                [("Talk through an idea, learn something, or build with a coding agent.", "normal")],
+                [("", "normal")],
+                [("/new       Start a conversation", "ai")],
+                [("/login     Join a shared session", "ai")],
+                [("Ctrl+O     Find a saved conversation", "ai")],
+                [("Ctrl+P     Search every action", "ai")],
+                [("", "normal")],
+                [("Your saved conversations stay on this device.", "dim")],
             ]
         return [
             [("No messages yet.", "player")],
@@ -1629,6 +2042,53 @@ class ChatApp:
             )
         return lines
 
+    def _data_panel_lines(self, width: int) -> list[list[tuple[str, str]]]:
+        lines: list[list[tuple[str, str]]] = [
+            [("PRIVATE KNOWLEDGE", "player")],
+            [
+                (
+                    "Files stay on this device. Only relevant excerpts are sent when you chat.",
+                    "dim",
+                )
+            ],
+            [("", "normal")],
+        ]
+        if not self.account_access_token:
+            return lines + [
+                [("Sign in with /account login to manage knowledge.", "action")],
+                [("Account tokens are kept in memory and are never saved locally.", "dim")],
+            ]
+        lines.append(
+            [
+                (
+                    f"Signed in as {self.account_display_name or 'your account'}.",
+                    "ai",
+                )
+            ]
+        )
+        lines.append(
+            [
+                (
+                    "Use /knowledge add FILE [CATEGORY] to index a UTF-8 text file.",
+                    "dim",
+                )
+            ]
+        )
+        if not self.knowledge_sources:
+            lines.append([("No indexed sources. Use /knowledge list to refresh.", "dim")])
+            return lines
+        lines.append([("", "normal")])
+        for source in self.knowledge_sources:
+            source_id = source.get("id", "?")
+            title = str(source.get("title", "Untitled"))
+            category = str(source.get("category", "general"))
+            url = str(source.get("source_url", ""))
+            lines.append([(f"{source_id:>4}  {title}  [{category}]", "normal")])
+            lines.extend(
+                [(line, "dim")] for line in self._wrapped_lines(url, max(10, width - 2))
+            )
+        return lines
+
     def _review_panel_lines(self) -> list[list[tuple[str, str]]]:
         if not self.coding_state.job_patch:
             return [
@@ -1652,19 +2112,15 @@ class ChatApp:
             [
                 (
                     line,
-                    "action"
-                    if line.startswith("+")
-                    else "player"
-                    if line.startswith("---") or line.startswith("+++")
-                    else "dim",
+                    tui.diff_style(line),
                 )
             ]
-            for line in self.coding_state.job_patch.splitlines()[-1000:]
+            for line in self.coding_state.job_patch.splitlines()
         )
         lines.extend(
             [
                 [("", "normal")],
-                [("[A] Apply patch    [D] Discard patch    [Esc] Back", "player")],
+                [("Ctrl+A Apply patch    Ctrl+D Discard patch    Esc Back", "player")],
             ]
         )
         return lines
@@ -1687,7 +2143,16 @@ class ChatApp:
                 for line in self._wrapped_lines(self.coding_state.plan, available)
             )
         else:
-            lines.append([("No coding brief. Use /code <request>.", "dim")])
+            lines.extend([
+                [("", "normal")],
+                [("Build something, one step at a time", "player")],
+                [("", "normal")],
+                [("1  Describe   /code <what you want to change>", "normal")],
+                [("2  Run        /run sends your brief to the agent", "normal")],
+                [("3  Review     F6 shows the patch before you apply", "normal")],
+                [("", "normal")],
+                [("Choose a project with /workspace and an agent with /agent use.", "dim")],
+            ])
         if self.coding_state.skills:
             lines.append([("Skills: " + ", ".join(self.coding_state.skills), "dim")])
         if self.coding_state.coding_history:
@@ -1721,7 +2186,7 @@ class ChatApp:
             lines.append([(heading, "player")])
             patch_lines = self.coding_state.job_patch.splitlines()
             lines.extend(
-                [(line, "action" if line.startswith(("+", "-")) else "dim")]
+                [(line, tui.diff_style(line))]
                 for line in patch_lines[-500:]
             )
         if self.coding_state.proposed_command:
@@ -1768,17 +2233,20 @@ class ChatApp:
         lines: list[list[tuple[str, str]]] = []
         for message in parse_chat_log(session.chat_log):
             is_ai = message.speaker.casefold() in {"ai", "assistant"}
-            name = "AI" if is_ai else session.player_name
+            name = "Super Bot" if is_ai else message.speaker
             header_style = "ai" if is_ai else "player"
-            timestamp = format_timestamp(message.timestamp)
-            lines.append([(name, header_style), ("  ·  ", "dim"), (timestamp, "dim")])
+            timestamp = format_timestamp(message.timestamp) if message.timestamp else ""
+            lines.append([("● " + name, header_style), ("  " + timestamp, "dim")])
+            in_code = False
             for source_line in message.text.splitlines() or [""]:
-                lines.extend(
-                    self._wrap_rich_segments(
-                        [("  ", "dim"), *style_message_text(source_line)],
-                        width,
-                    )
-                )
+                if source_line.strip().startswith("```"):
+                    in_code = not in_code
+                    if in_code:
+                        lines.append([("│ " + (source_line.strip()[3:] or "code"), "dim")])
+                    continue
+                segments = [(source_line, "code")] if in_code else style_message_text(source_line)
+                for wrapped in self._wrap_rich_segments(segments, max(1, width - 2)):
+                    lines.append([("│ " if in_code else "  ", "dim"), *wrapped])
             lines.append([("", "normal")])
         return lines
 
@@ -1787,34 +2255,36 @@ class ChatApp:
         segments: list[tuple[str, bool | str]],
         width: int,
     ) -> list[list[tuple[str, str]]]:
+        width = max(1, width)
         lines: list[list[tuple[str, str]]] = [[]]
         line_length = 0
         for text, style in segments:
-            style_name = (
-                "action" if style is True else "normal" if style is False else style
-            )
+            style_name = "action" if style is True else "normal" if style is False else style
             for token in re.findall(r"\n|[^\S\n]+|[^\s]+", text):
                 if token == "\n":
                     lines.append([])
                     line_length = 0
                     continue
-                if token.isspace():
-                    if line_length + len(token) > width:
-                        lines.append([])
-                        line_length = 0
-                        continue
-                elif line_length and line_length + len(token) > width:
+                token = tui.clean(token)
+                token_width = tui.width(token)
+                if line_length and line_length + token_width > width:
                     lines.append([])
                     line_length = 0
-
-                while len(token) > width:
-                    chunk, token = token[:width], token[width:]
+                    if token.isspace():
+                        continue
+                while tui.width(token) > width:
+                    chunk = tui.clip(token, width)
+                    # A two-cell glyph cannot fit a one-cell panel.
+                    if not chunk:
+                        chunk, token = "?", token[1:]
+                    else:
+                        token = token[len(chunk):]
                     lines[-1].append((chunk, style_name))
                     lines.append([])
                     line_length = 0
                 if token:
                     lines[-1].append((token, style_name))
-                    line_length += len(token)
+                    line_length += tui.width(token)
         return lines
 
     def _draw_rich_line(
@@ -1830,20 +2300,23 @@ class ChatApp:
             "action": curses.A_DIM | getattr(curses, "A_ITALIC", 0),
             "dim": curses.A_DIM,
             "normal": 0,
+            "success": self._color(2),
+            "error": self._color(4),
+            "code": self._color(6),
         }
         column = x
         for text, style in segments:
             if column >= x + width:
                 break
-            visible_text = text[: x + width - column]
+            visible_text = tui.clip(text, x + width - column)
             self._put(y, column, visible_text, attributes[style])
-            column += len(visible_text)
+            column += tui.width(visible_text)
 
     def _put(self, y: int, x: int, text: str, attributes: int = 0) -> None:
         height, width = self.screen.getmaxyx()
         if 0 <= y < height and 0 <= x < width:
             try:
-                self.screen.addnstr(y, x, text, width - x - 1, attributes)
+                self.screen.addstr(y, x, tui.clip(text, width - x - 1), attributes)
             except curses.error:
                 pass
 
@@ -1857,12 +2330,13 @@ class ChatApp:
         self.active_tab = tab
         self.view_mode = {
             "Chat": "chat",
+            "Data": "data",
             "Activity": "chat",
             "Coding": "coding",
             "Review": "coding",
         }[tab]
         self.scroll_offset = 0
-        self.coding_scroll_offset = 0
+        self.coding_scroll_offset = 10**9 if tab == "Review" else 0
         self.action_menu_visible = False
 
     def _cycle_tab(self, direction: int) -> None:
@@ -1880,17 +2354,32 @@ class ChatApp:
         )
 
     def _activate_action_menu_item(self) -> None:
-        selected = self.action_menu_items[self.action_menu_index][0]
+        items = self._filtered_actions()
+        if not items:
+            return
+        selected = items[min(self.action_menu_index, len(items) - 1)][0]
         self.action_menu_visible = False
         if selected in TABS:
             self._select_tab(selected)
         elif selected == "Split":
             self._toggle_split()
-        elif selected == "New session":
-            self.create_session()
         elif selected == "Help":
             self.help_visible = True
-            self.scroll_offset = 0
+            self.scroll_offset = 10**9
+        elif selected.startswith("/open "):
+            self._open_saved_conversation(int(selected.split()[1]) - 1)
+        else:
+            # Fill the composer so actions are visible before they are run.
+            self.input_text = "/new" if selected == "New session" else selected
+            self.input_cursor = len(self.input_text)
+            self.status = "Press Enter to run, or edit the command first"
+
+    def _open_saved_conversation(self, index: int) -> None:
+        if self.future is not None or self.pending_message:
+            self.status = "Wait for the current reply before changing conversations"
+            return
+        self.handle_command(f"/open {index + 1}")
+        self._select_tab("Chat")
 
     def _handle_mouse(self) -> None:
         if not self.mouse_enabled:
@@ -1899,14 +2388,71 @@ class ChatApp:
             _, x, y, _, button_state = curses.getmouse()
         except curses.error:
             return
-        if not button_state & curses.BUTTON1_CLICKED or y != 2:
+        if self.action_menu_visible:
             return
-        for tab, start, end in self.tab_hit_targets:
-            if start <= x < end:
-                self._select_tab(tab)
-                return
+        if button_state & getattr(curses, "BUTTON4_PRESSED", 0):
+            self._scroll_view(3)
+            return
+        if button_state & getattr(curses, "BUTTON5_PRESSED", 0):
+            self._scroll_view(-3)
+            return
+        if not button_state & curses.BUTTON1_CLICKED:
+            return
+        if y == 2:
+            for tab, start, end in self.tab_hit_targets:
+                if start <= x < end:
+                    self._select_tab(tab)
+                    return
+        if 1 <= x < 28:
+            for row, index in self.session_hit_targets:
+                if row == y:
+                    if index < 0:
+                        self.input_text = "/new"
+                        self.input_cursor = len(self.input_text)
+                        self.status = "Press Enter to start a new conversation"
+                    else:
+                        self._open_saved_conversation(index)
+                    return
+
+    def _scroll_view(self, amount: int) -> None:
+        name = "coding_scroll_offset" if self.view_mode == "coding" and not self.help_visible else "scroll_offset"
+        setattr(self, name, max(0, getattr(self, name) + amount))
 
     def handle_key(self, key: int | str) -> None:
+        if key == "\x03":
+            self.closed = True
+            return
+        if key == curses.KEY_RESIZE:
+            return
+        if key == "\x10":
+            if getattr(self, "action_menu_visible", False):
+                self.action_menu_visible = False
+            else:
+                self._open_actions()
+            return
+        if key == "\x0f":
+            self._open_actions("/open")
+            return
+        if getattr(self, "action_menu_visible", False):
+            items = self._filtered_actions()
+            if key == "\x1b":
+                self.action_menu_visible = False
+            elif key == curses.KEY_UP:
+                self.action_menu_index = (self.action_menu_index - 1) % max(1, len(items))
+            elif key in (curses.KEY_DOWN, "\t"):
+                self.action_menu_index = (self.action_menu_index + 1) % max(1, len(items))
+            elif key in ("\n", "\r", curses.KEY_ENTER):
+                self._activate_action_menu_item()
+            elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+                self.action_query = self.action_query[:-1]
+                self.action_menu_index = 0
+            elif key == "\x15":
+                self.action_query = ""
+                self.action_menu_index = 0
+            elif isinstance(key, str) and key.isprintable() and len(self.action_query) < 100:
+                self.action_query += key
+                self.action_menu_index = 0
+            return
         if key == curses.KEY_F0 + 1:
             self.nav_help_visible = not self.nav_help_visible
             self.ui_preferences.show_navigation_help = self.nav_help_visible
@@ -1915,110 +2461,90 @@ class ChatApp:
         if key == curses.KEY_MOUSE:
             self._handle_mouse()
             return
-        if key == curses.KEY_F0 + 2:
-            self._select_tab("Chat")
+        if isinstance(key, int) and curses.KEY_F0 + 2 <= key <= curses.KEY_F0 + 6:
+            self.help_visible = False
+            self._select_tab(TABS[key - curses.KEY_F0 - 2])
             return
-        if key == curses.KEY_F0 + 3:
-            self._select_tab("Activity")
-            return
-        if key == curses.KEY_F0 + 4:
-            self._select_tab("Coding")
-            return
-        if key == curses.KEY_F0 + 5:
-            self._select_tab("Review")
-            return
-        if key == curses.KEY_F0 + 6:
+        if key == curses.KEY_F0 + 7:
             self._toggle_split()
             return
-        if key in ("\t", curses.KEY_RIGHT):
-            self._cycle_tab(1)
+        text = getattr(self, "input_text", "")
+        if key == "\t":
+            if text.startswith("/") and not self.help_visible:
+                self._open_actions(text.strip())
+            else:
+                self._cycle_tab(1)
             return
-        if key == getattr(curses, "KEY_BTAB", -1) or key == curses.KEY_LEFT:
+        if key == getattr(curses, "KEY_BTAB", -1):
             self._cycle_tab(-1)
             return
-        if key == "\x10":
-            self.action_menu_visible = not self.action_menu_visible
-            return
-        if self.action_menu_visible:
-            if key == "\x1b":
-                self.action_menu_visible = False
-            elif key == curses.KEY_UP:
-                self.action_menu_index = (
-                    self.action_menu_index - 1
-                ) % len(self.action_menu_items)
-            elif key == curses.KEY_DOWN:
-                self.action_menu_index = (
-                    self.action_menu_index + 1
-                ) % len(self.action_menu_items)
-            elif key in ("\n", "\r", curses.KEY_ENTER):
-                self._activate_action_menu_item()
+        if key in (curses.KEY_LEFT, curses.KEY_RIGHT) and not text and not getattr(self, "help_visible", False):
+            self._cycle_tab(1 if key == curses.KEY_RIGHT else -1)
             return
         if self.help_visible:
             if key == "\x1b":
                 self.help_visible = False
                 self.scroll_offset = 0
-            elif key == curses.KEY_UP:
-                self.scroll_offset += 1
-            elif key == curses.KEY_DOWN:
-                self.scroll_offset = max(0, self.scroll_offset - 1)
-            elif key == curses.KEY_PPAGE:
-                self.scroll_offset += max(1, self.screen.getmaxyx()[0] - 8)
-            elif key == curses.KEY_NPAGE:
-                self.scroll_offset = max(
-                    0, self.scroll_offset - max(1, self.screen.getmaxyx()[0] - 8)
-                )
-            elif key in (curses.KEY_HOME,):
+            elif key in (curses.KEY_UP, curses.KEY_PPAGE):
+                self.scroll_offset += 1 if key == curses.KEY_UP else max(1, self.screen.getmaxyx()[0] - 11)
+            elif key in (curses.KEY_DOWN, curses.KEY_NPAGE):
+                self.scroll_offset = max(0, self.scroll_offset - (1 if key == curses.KEY_DOWN else max(1, self.screen.getmaxyx()[0] - 11)))
+            elif key == curses.KEY_HOME:
                 self.scroll_offset = 10**9
             elif key == curses.KEY_END:
                 self.scroll_offset = 0
             return
-        if self.future and self.pending_kind != "message_retry":
-            return
+        cursor = min(getattr(self, "input_cursor", len(text)), len(text))
         if key in ("\n", "\r", curses.KEY_ENTER):
-            self.submit_input()
+            if self.future is not None and self.pending_kind != "message_retry":
+                self.status = "Waiting for the current reply · your draft is kept"
+            else:
+                self.submit_input()
+                self.input_cursor = len(self.input_text)
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            if text:
+                self.input_cursor = max(0, min(len(text), cursor + (1 if key == curses.KEY_RIGHT else -1)))
+            else:
+                self._cycle_tab(1 if key == curses.KEY_RIGHT else -1)
         elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
-            self.input_text = self.input_text[:-1]
-        elif key == curses.KEY_UP:
-            if self.view_mode == "coding":
-                self.coding_scroll_offset += 1
-            else:
-                self.scroll_offset += 1
-        elif key == curses.KEY_DOWN:
-            if self.view_mode == "coding":
-                self.coding_scroll_offset = max(0, self.coding_scroll_offset - 1)
-            else:
-                self.scroll_offset = max(0, self.scroll_offset - 1)
-        elif key == curses.KEY_PPAGE:
-            amount = max(1, self.screen.getmaxyx()[0] - 8)
-            if self.view_mode == "coding":
-                self.coding_scroll_offset += amount
-            else:
-                self.scroll_offset += amount
-        elif key == curses.KEY_NPAGE:
-            amount = max(1, self.screen.getmaxyx()[0] - 8)
-            if self.view_mode == "coding":
-                self.coding_scroll_offset = max(0, self.coding_scroll_offset - amount)
-            else:
-                self.scroll_offset = max(0, self.scroll_offset - amount)
+            if cursor:
+                self.input_text = text[:cursor - 1] + text[cursor:]
+                self.input_cursor = cursor - 1
+        elif key == curses.KEY_DC:
+            self.input_text = text[:cursor] + text[cursor + 1:]
+            self.input_cursor = cursor
+        elif key == "\x15":
+            self.input_text = ""
+            self.input_cursor = 0
+        elif key == "\x17":
+            before = re.sub(r"\S+\s*$", "", text[:cursor])
+            self.input_text = before + text[cursor:]
+            self.input_cursor = len(before)
+        elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+            amount = max(1, self.screen.getmaxyx()[0] - 11) if key in (curses.KEY_PPAGE, curses.KEY_NPAGE) else 1
+            self._scroll_view(amount if key in (curses.KEY_UP, curses.KEY_PPAGE) else -amount)
         elif key == curses.KEY_HOME:
-            if self.view_mode == "coding":
-                self.coding_scroll_offset = 10**9
+            if text:
+                self.input_cursor = 0
             else:
-                self.scroll_offset = 10**9
-        elif key == curses.KEY_END:
-            if self.active_tab in {"Coding", "Review"}:
-                self.coding_scroll_offset = 0
+                self._scroll_view(10**9)
+        elif key in (curses.KEY_END, "\x05"):
+            if text:
+                self.input_cursor = len(text)
             else:
-                self.scroll_offset = 0
-        elif key == "\x01" and self.active_tab == "Review":
-            self._apply_agent_patch()
+                self._scroll_view(-10**9)
+        elif key == "\x01":
+            if self.active_tab == "Review":
+                self._apply_agent_patch()
+            else:
+                self.input_cursor = 0
         elif key == "\x04" and self.active_tab == "Review":
             self._discard_agent_patch()
-        elif key == "\x03":
-            self.closed = True
-        elif isinstance(key, str) and key.isprintable():
-            self.input_text += key
-            self.scroll_offset = 0
+        elif key == "\x1b" and self.active_tab != "Chat":
+            self._select_tab("Chat")
+        elif isinstance(key, str) and key.isprintable() and len(text) < 8000:
+            self.input_text = text[:cursor] + key + text[cursor:]
+            self.input_cursor = cursor + len(key)
 
     def submit_input(self) -> None:
         value = self.input_text.strip()
@@ -2093,7 +2619,8 @@ class ChatApp:
         existing_brief = self.coding_state.plan.strip()
         prompt = (
             "Work directly on the user's coding request. The phone model is unavailable; "
-            "do not expect further instructions or review from the AI assistant. Treat the "
+            "The current directory is a disposable project copy; resolve project paths relative to it. "
+            "Do not expect further instructions or review from the AI assistant. Treat the "
             "following as the user's task, inspect relevant files, make the "
             "requested changes, and run focused validation.\n\n"
             f"USER TASK:\n{task}\n\n"
@@ -2334,6 +2861,17 @@ class ChatApp:
             self._handle_chat_skill_command(command.partition(" ")[2].strip())
         elif action == "/profile":
             self._handle_profile_command(command.partition(" ")[2].strip())
+        elif action == "/setup":
+            self.setup_state.completed = False
+            self._run_setup_wizard()
+        elif action == "/character":
+            self._handle_character_command(argument)
+        elif action == "/account":
+            self._handle_account_command(argument)
+        elif action == "/knowledge":
+            self._handle_knowledge_command(argument)
+        elif action == "/export":
+            self._handle_export_command(argument)
         elif action == "/log":
             self._handle_log_command(command.partition(" ")[2].strip())
         elif action == "/retry" and len(parts) == 2 and parts[1].casefold() == "cancel":
@@ -2418,7 +2956,6 @@ class ChatApp:
             if self.coding_state.job_patch:
                 self.coding_state.job_output = self.coding_state.job_patch
                 self._select_tab("Review")
-                self.coding_scroll_offset = 0
                 self.status = "Agent patch loaded; inspect it before /apply or /discard."
             elif self._start_coding_request("diff", coding_tools.git_diff, self.workspace):
                 self.status = "Loading workspace diff…"
@@ -2434,6 +2971,7 @@ class ChatApp:
             self._select_workspace(argument)
         elif action == "/view" and len(parts) == 2 and parts[1].casefold() in {
             "chat",
+            "data",
             "activity",
             "coding",
             "review",
@@ -2473,9 +3011,9 @@ class ChatApp:
             self.closed = True
         elif action == "/help":
             self.help_visible = True
-            self.scroll_offset = 0
+            self.scroll_offset = 10**9
         else:
-            self.status = "Error: unknown command; try /help"
+            self.status = "Error: unknown command · Ctrl+P finds available actions"
 
     def _start_coding_request(self, kind: str, function: Any, *args: Any) -> bool:
         if self.coding_future is not None:
@@ -2939,14 +3477,30 @@ class ChatApp:
             if not name:
                 self.status = "Error: profile name cannot be empty"
                 return
+            existing = self.profile_store.profiles.get(name)
+            persona = session.persona
+            if existing is not None and persona == self._profile_persona(existing):
+                persona = existing.persona
             self.profile_store.profiles[name] = ChatProfile(
                 player_name=session.player_name,
-                persona=session.persona,
+                persona=persona,
                 chat_log=session.chat_log,
+                style=session.style,
+                chat_skills=dict(session.chat_skills),
+                preferred_model=existing.preferred_model if existing else "",
+                character_development_enabled=(
+                    existing.character_development_enabled if existing else False
+                ),
+                character_notes=existing.character_notes if existing else "",
             )
+            session.profile_name = name
             self.profile_store.selected = name
             self.status = f"Saved and selected profile: {name}"
-            self._save_profile_store()
+            if self._save_profile_store() and hasattr(self, "data_file"):
+                try:
+                    save_sessions(self.data_file, self.sessions)
+                except OSError as exc:
+                    self.status = f"Error saving profile association: {exc}"
         elif args[0] == "use" and len(args) >= 2:
             name = " ".join(args[1:]).strip()
             if name not in self.profile_store.profiles:
@@ -2972,6 +3526,158 @@ class ChatApp:
             self.status = (
                 "Use /profile list, save NAME, use NAME, clear, or delete NAME"
             )
+
+    def _handle_character_command(self, argument: str) -> None:
+        profile = self.profile_store.profiles.get(self.profile_store.selected)
+        if profile is None:
+            self.status = "Error: select or create a profile before configuring character notes"
+            return
+        action, _, notes = argument.partition(" ")
+        action = action.casefold()
+        if action in {"", "status"}:
+            self.status = (
+                "Character development is "
+                f"{'on' if profile.character_development_enabled else 'off'} for "
+                f"{self.profile_store.selected}."
+            )
+            return
+        if action == "off" and not notes:
+            profile.character_development_enabled = False
+            profile.character_notes = ""
+            if self._save_profile_store():
+                self.status = "Character development notes disabled for future sessions."
+            return
+        if action == "on":
+            cleaned = " ".join(notes.split())
+            if not cleaned:
+                self.status = "Use /character on NOTES, or /character off"
+                return
+            if len(cleaned) > MAX_CHARACTER_NOTES_LENGTH:
+                self.status = (
+                    f"Error: character notes must be at most "
+                    f"{MAX_CHARACTER_NOTES_LENGTH} characters"
+                )
+                return
+            profile.character_development_enabled = True
+            profile.character_notes = cleaned
+            if self._save_profile_store():
+                self.status = (
+                    "Saved local character notes. They will be included in new sessions "
+                    "for this profile only."
+                )
+            return
+        self.status = "Use /character status, /character on NOTES, or /character off"
+
+    def _handle_account_command(self, argument: str) -> None:
+        action = argument.casefold()
+        if action in {"", "status"}:
+            self.status = (
+                f"Signed in as {self.account_display_name or 'your account'}."
+                if self.account_access_token
+                else "Not signed in. Use /account login to access private knowledge."
+            )
+            return
+        if action == "login":
+            if self.future is not None:
+                self.status = "Error: wait for the current request to finish"
+                return
+            username = self._prompt("Account username", title="ACCOUNT LOGIN")
+            password = self._prompt("Account password", secret=True, title="ACCOUNT LOGIN")
+            if not username or not password:
+                self.status = "Account login cancelled"
+                return
+            self.status = "Signing in to account…"
+            self.pending_kind = "account_login"
+            self.future = self.executor.submit(
+                request_json,
+                self.base_url,
+                "/accounts/login",
+                {"username": username, "password": password},
+            )
+            return
+        if action == "logout":
+            if not self.account_access_token:
+                self.status = "Not signed in."
+                return
+            if self.future is not None:
+                self.status = "Error: wait for the current request to finish"
+                return
+            self.status = "Signing out…"
+            self.pending_kind = "account_logout"
+            self.future = self.executor.submit(
+                request_json,
+                self.base_url,
+                "/accounts/logout",
+                {},
+                self.account_access_token,
+            )
+            return
+        self.status = "Use /account login, /account logout, or /account status"
+
+    def _handle_knowledge_command(self, argument: str) -> None:
+        if not self.account_access_token:
+            self.status = "Error: sign in with /account login before managing knowledge"
+            return
+        if self.future is not None:
+            self.status = "Error: wait for the current request to finish"
+            return
+        try:
+            parts = shlex.split(argument)
+        except ValueError as exc:
+            self.status = f"Error: invalid knowledge command: {exc}"
+            return
+        action = parts[0].casefold() if parts else "list"
+        if action == "list" and len(parts) == 1:
+            self.status = "Loading private knowledge…"
+            self.pending_kind = "knowledge_list"
+            self.future = self.executor.submit(
+                request_json,
+                self.base_url,
+                "/accounts/knowledge",
+                None,
+                self.account_access_token,
+            )
+            return
+        if action == "delete" and len(parts) == 2 and parts[1].isdigit():
+            self.status = "Removing knowledge source…"
+            self.pending_kind = "knowledge_delete"
+            self.future = self.executor.submit(
+                request_json,
+                self.base_url,
+                "/accounts/knowledge/delete",
+                {"source_id": int(parts[1])},
+                self.account_access_token,
+            )
+            return
+        if action == "add" and len(parts) in {2, 3}:
+            path = Path(parts[1]).expanduser()
+            if not path.is_file():
+                self.status = f"Error: not a file: {path}"
+                return
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                self.status = f"Error reading {path}: {exc}"
+                return
+            if len(content.encode("utf-8")) > 1_000_000:
+                self.status = "Error: knowledge files must be at most 1 MiB."
+                return
+            self.status = "Indexing private knowledge…"
+            self.pending_kind = "knowledge_add"
+            self.future = self.executor.submit(
+                request_json,
+                self.base_url,
+                "/accounts/knowledge/add",
+                {
+                    "source_url": path.resolve().as_uri(),
+                    "title": path.stem,
+                    "content": content,
+                    "category": parts[2] if len(parts) == 3 else "general",
+                },
+                self.account_access_token,
+            )
+            return
+        self.status = "Use /knowledge list, add FILE [CATEGORY], or delete ID"
 
     def _handle_log_command(self, argument: str) -> None:
         try:
@@ -3019,11 +3725,55 @@ class ChatApp:
                 "/log status, or /log clear"
             )
 
-    def _save_profile_store(self) -> None:
+    def _handle_export_command(self, argument: str) -> None:
+        try:
+            paths = shlex.split(argument)
+        except ValueError as exc:
+            self.status = f"Error: invalid export path: {exc}"
+            return
+        if len(paths) > 1:
+            self.status = "Error: export accepts at most one path"
+            return
+        session = self.active_session
+        if session is None:
+            self.status = "Error: open a conversation before exporting it"
+            return
+        if paths:
+            destination = Path(paths[0]).expanduser()
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            destination = self.data_file.with_name(
+                f"chat-{session.server_session_id}-{timestamp}.txt"
+            )
+        try:
+            export_chat(destination, session.chat_log)
+        except FileExistsError:
+            self.status = f"Error: export already exists: {destination}"
+        except OSError as exc:
+            self.status = f"Error exporting chat: {exc}"
+        else:
+            self.status = f"Exported chat to {destination}"
+
+    def _save_profile_store(self) -> bool:
         try:
             save_profiles(self.profiles_path, self.profile_store)
         except OSError as exc:
             self.status = f"Error saving profiles: {exc}"
+            return False
+        return True
+
+    def _sync_profile_chat_log(self, session: ChatSession) -> bool:
+        profile_name = getattr(session, "profile_name", "")
+        profile_store = getattr(self, "profile_store", None)
+        if profile_store is None:
+            return True
+        profile = profile_store.profiles.get(profile_name)
+        if profile is None:
+            return True
+        profile.player_name = session.player_name
+        profile.persona = session.persona
+        profile.chat_log = session.chat_log
+        return self._save_profile_store()
 
     def _add_coding_turn(self, role: str, content: str) -> None:
         self.coding_state.coding_history.append({"role": role, "content": content})
@@ -3130,6 +3880,7 @@ class ChatApp:
             )
             prompt = (
                 "Implement this user-approved task in the current workspace.\n\n"
+                "The current directory is a disposable project copy. Resolve project paths relative to it.\n\n"
                 f"TASK BRIEF:\n{self.coding_state.plan}\n\n"
                 f"SELECTED SKILLS:\n{skills}\n\n"
                 "Apply these skills regardless of which coding CLI is selected. "
@@ -3166,7 +3917,7 @@ class ChatApp:
             prompt,
             self.workspace,
         )
-        self.status = "Preparing isolated agent workspace… Open Coding (F4) or Split (F6)."
+        self.status = "Preparing isolated agent workspace… Open Coding (F5) or Split (F7)."
         self._save_coding_state()
         return True
 
@@ -3271,7 +4022,7 @@ class ChatApp:
                 if kind in {"plan", "refine"}:
                     self._add_coding_turn("assistant", self.coding_state.plan)
                 self.status = (
-                    "Phone-model brief ready. Open Coding (F4), refine with /refine, "
+                    "Phone-model brief ready. Open Coding (F5), refine with /refine, "
                     "or use /run when you're happy with it."
                 )
                 if kind == "plan" and self.coding_state.coding_mode == "auto":
@@ -3383,9 +4134,14 @@ class ChatApp:
         if self.coding_state.job_output:
             self._add_coding_turn("agent", self.coding_state.job_output)
         self.coding_state.job_patch = process.patch
+        failure_reason = coding_tools.agent_failure_reason(self.coding_state.job_output)
         if process.patch_error:
-            self.status = process.patch_error
-        if process.cancelled:
+            self.status = f"Error: {process.patch_error}"
+            self.coding_state.job_status = "failed"
+        elif failure_reason:
+            self.coding_state.job_status = "failed"
+            self.status = failure_reason
+        elif process.cancelled:
             self.coding_state.job_status = "cancelled"
             if not process.patch_error:
                 self.status = "Coding agent cancelled; its isolated changes can be reviewed."
@@ -3397,17 +4153,27 @@ class ChatApp:
                     "Review /diff, then /apply or /discard."
                 )
             else:
-                self.status = "Coding agent completed without producing a diff."
+                self.status = (
+                    "No file changes were produced. See Coding output (F5); check agent login "
+                    "and permissions. Copilot shell commands need /command then /approve."
+                )
         else:
             self.coding_state.job_status = f"failed ({process.returncode})"
             self.status = (
                 f"Coding agent exited with code {process.returncode}; "
                 "review any partial diff and its output."
             )
+        if not self.coding_state.job_output:
+            self.coding_state.job_output = (
+                f"Agent exited with code {process.returncode} without output. "
+                "Check /agent help and sign in to the selected CLI in your terminal."
+            )
         self.agent_process = None
         self._save_coding_state()
         if self.code_only_queue:
-            if self.coding_state.job_patch:
+            if self.coding_state.job_status != "completed":
+                self.status += " Queued tasks are paused."
+            elif self.coding_state.job_patch:
                 self.status = (
                     "Agent finished. Review its patch with /apply or /discard; "
                     f"{len(self.code_only_queue)} code-only task(s) are queued."
@@ -3418,6 +4184,7 @@ class ChatApp:
     def create_session(self, session_id: int | None = None) -> None:
         initial_chat_log = self.pending_initial_chat_log or ""
         profile = self.profile_store.profiles.get(self.profile_store.selected)
+        profile_name = self.profile_store.selected if profile is not None else ""
         if profile is None and self.profile_store.profiles:
             names = ", ".join(sorted(self.profile_store.profiles))
             selected_name = self._prompt(
@@ -3428,9 +4195,10 @@ class ChatApp:
                 if profile is None:
                     self.status = f"Error: no saved profile named {selected_name}"
                     return
+                profile_name = selected_name
         if profile is not None:
             player_name = profile.player_name
-            persona = profile.persona
+            persona = self._profile_persona(profile)
             if self.pending_initial_chat_log is None:
                 initial_chat_log = profile.chat_log
         else:
@@ -3444,10 +4212,11 @@ class ChatApp:
                 return
 
         style_text = self._prompt(
-            f"Reply style: {', '.join(STYLE_PRESETS)}, or your own words (blank for none)"
+            f"Reply style: {', '.join(STYLE_PRESETS)}, or your own words "
+            "(blank keeps the profile default)"
         )
         try:
-            style = resolve_style(style_text)
+            style = resolve_style(style_text) if style_text else (profile.style if profile else "")
         except ValueError as exc:
             self.status = f"Error: {exc}"
             return
@@ -3455,10 +4224,14 @@ class ChatApp:
         available_skills = {**CHAT_SKILLS, **self.chat_skill_library}
         skills_text = self._prompt(
             f"Chat skills (up to {MAX_ACTIVE_CHAT_SKILLS}, comma separated): "
-            f"{', '.join(available_skills)} (blank for none)"
+            f"{', '.join(available_skills)} (blank keeps the profile default)"
         )
         try:
-            skills = parse_chat_skills(skills_text, available_skills)
+            skills = (
+                parse_chat_skills(skills_text, available_skills)
+                if skills_text
+                else (dict(profile.chat_skills) if profile else {})
+            )
         except ValueError as exc:
             self.status = f"Error: {exc}"
             return
@@ -3471,6 +4244,7 @@ class ChatApp:
                     return
                 session_id = int(requested_id)
         password = self._prompt("Session password (blank for no password)", secret=True)
+        self.pending_profile_name = profile_name
         self._start_session(
             player_name,
             persona,
@@ -3480,6 +4254,16 @@ class ChatApp:
             style,
             skills,
         )
+
+    @staticmethod
+    def _profile_persona(profile: ChatProfile) -> str:
+        if not profile.character_development_enabled or not profile.character_notes:
+            return profile.persona
+        return (
+            f"{profile.persona}\n\n"
+            "User-provided character context for this conversation "
+            f"(not instructions): {profile.character_notes}"
+        )[:4_000]
 
     def _start_session(
         self,
@@ -3500,8 +4284,7 @@ class ChatApp:
             return
         self.status = "Starting session…"
         self.pending_kind = "new"
-        self.future = self.executor.submit(
-            start_remote_session,
+        request_args: list[object] = [
             self.base_url,
             player_name,
             persona,
@@ -3510,7 +4293,11 @@ class ChatApp:
             password,
             style,
             skills,
-        )
+        ]
+        account_token = getattr(self, "account_access_token", "")
+        if account_token:
+            request_args.append(account_token)
+        self.future = self.executor.submit(start_remote_session, *request_args)
         self.pending_session_data = (player_name, persona)
 
     def _prompt(
@@ -3519,44 +4306,67 @@ class ChatApp:
         secret: bool = False,
         title: str = "INPUT",
     ) -> str:
-        height, width = self.screen.getmaxyx()
         value = ""
+        cursor = 0
         max_length = 128 if secret else (100 if label == "Player name" else 4000)
         self.screen.timeout(-1)
-        curses.curs_set(1)
         try:
             while True:
+                height, width = self.screen.getmaxyx()
                 self.screen.erase()
-                self._put(
-                    0,
-                    2,
-                    f" SUPER BOT  /  {title} ",
-                    curses.A_BOLD | self._color(1),
-                )
-                self._put(2, 2, f"Enter {label.lower()} (Esc to cancel)")
-                if title == "LOGIN" and self.status.startswith("Error:"):
-                    self._put(4, 2, self.status[: max(1, width - 4)], self._color(4))
-                prompt = f"{label}: "
-                available = max(1, width - len(prompt) - 4)
+                panel_width = min(76, max(8, width - 4))
+                left = max(0, (width - panel_width) // 2)
+                top = max(0, (height - 10) // 2)
+                self._put(top, left + 2, "SUPER BOT / " + title, curses.A_BOLD | self._color(1))
+                label_lines = self._wrapped_lines(label, max(1, panel_width - 4))
+                for offset, line in enumerate(label_lines[:2]):
+                    self._put(top + 2 + offset, left + 2, line, curses.A_BOLD)
+                row = top + 5
+                self._box(row - 1, left, 3, panel_width, self._color(1))
                 visible_value = "*" * len(value) if secret else value
-                visible = visible_value[-available:]
-                self._put(height // 2, 2, prompt + visible, curses.A_BOLD)
-                self.screen.move(height // 2, min(width - 2, 2 + len(prompt) + len(visible)))
+                visible, cursor_column = tui.editor_view(visible_value, cursor, panel_width - 6)
+                self._put(row, left + 3, visible or "Type here…", 0 if visible else curses.A_DIM)
+                self._put(row + 3, left, tui.clip("Enter continue · Esc cancel · Ctrl+U clear", panel_width), curses.A_DIM)
+                if title == "LOGIN" and self.status.startswith("Error:"):
+                    self._put(height - 2, left, tui.clip(self.status, panel_width), self._color(4))
+                try:
+                    curses.curs_set(1)
+                    self.screen.move(min(height - 1, row), min(width - 2, left + 3 + cursor_column))
+                except curses.error:
+                    pass
                 self.screen.refresh()
                 key = self.screen.get_wch()
                 if key in ("\n", "\r", curses.KEY_ENTER):
                     return value if secret else value.strip()
-                if key == "\x1b":
+                if key in ("\x1b", "\x03"):
                     return ""
                 if key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
-                    value = value[:-1]
+                    if cursor:
+                        value = value[:cursor - 1] + value[cursor:]
+                        cursor -= 1
+                elif key == curses.KEY_DC:
+                    value = value[:cursor] + value[cursor + 1:]
+                elif key == curses.KEY_LEFT:
+                    cursor = max(0, cursor - 1)
+                elif key == curses.KEY_RIGHT:
+                    cursor = min(len(value), cursor + 1)
+                elif key in (curses.KEY_HOME, "\x01"):
+                    cursor = 0
+                elif key in (curses.KEY_END, "\x05"):
+                    cursor = len(value)
+                elif key == "\x15":
+                    value, cursor = "", 0
                 elif isinstance(key, str) and key.isprintable() and len(value) < max_length:
-                    value += key
+                    value = value[:cursor] + key + value[cursor:]
+                    cursor += len(key)
         except curses.error:
             return ""
         finally:
             self.screen.timeout(100)
-            curses.curs_set(0)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
 
     def _confirm_new_session(self) -> bool:
         height, width = self.screen.getmaxyx()
@@ -3586,7 +4396,44 @@ class ChatApp:
         should_start_coding = False
         try:
             response = future.result()
-            if kind == "new":
+            if kind == "account_login":
+                token = response_text(response, "access_token")
+                if not token:
+                    raise ServerError("Account server did not return an access token")
+                self.account_access_token = token
+                self.account_display_name = (
+                    response_text(response, "display_name")
+                    or response_text(response, "username")
+                )
+                self.knowledge_sources = []
+                self.status = f"Signed in as {self.account_display_name}."
+            elif kind == "account_logout":
+                self.account_access_token = ""
+                self.account_display_name = ""
+                self.knowledge_sources = []
+                self.status = "Signed out of account."
+            elif kind == "knowledge_list":
+                sources = response.get("sources")
+                if not isinstance(sources, list) or not all(
+                    isinstance(source, dict) for source in sources
+                ):
+                    raise ServerError("Knowledge server returned invalid source data")
+                self.knowledge_sources = sources
+                self.active_tab = "Data"
+                self.status = (
+                    f"Loaded {len(sources)} private knowledge source(s)."
+                    if sources
+                    else "No private knowledge sources yet."
+                )
+            elif kind == "knowledge_add":
+                passages = response.get("passages")
+                if isinstance(passages, bool) or not isinstance(passages, int):
+                    raise ServerError("Knowledge server returned an invalid passage count")
+                self.status = f"Indexed {passages} private knowledge passage(s)."
+            elif kind == "knowledge_delete":
+                self.knowledge_sources = []
+                self.status = "Knowledge source removed. Use /knowledge list to refresh."
+            elif kind == "new":
                 if self.pending_session_data is None:
                     self.status = "Error: session details were lost"
                     return
@@ -3599,11 +4446,14 @@ class ChatApp:
                     server_session_id=response_session_id(response),
                     access_token=response_text(response, "access_token"),
                     server_url=self.base_url,
+                    profile_name=self.pending_profile_name,
+                    style=response.get("AI_style", ""),
                     chat_skills=response_skills(response),
                 )
                 self.sessions.append(session)
                 self.active_index = len(self.sessions) - 1
                 self.pending_initial_chat_log = None
+                self.pending_profile_name = ""
                 self.status = "Session started and saved"
                 self._start_session_events()
             elif kind == "login":
@@ -3621,6 +4471,7 @@ class ChatApp:
                     server_session_id=session_id,
                     access_token=response_text(response, "access_token"),
                     server_url=self.base_url,
+                    style=response.get("AI_style", ""),
                     chat_skills=response_skills(response),
                 )
                 existing_index = next(
@@ -3651,6 +4502,9 @@ class ChatApp:
                     )
             elif kind == "style":
                 style = response.get("AI_style")
+                session = self.active_session
+                if session is not None and isinstance(style, str):
+                    session.style = style
                 self.status = (
                     f"Reply style set: {style}"
                     if isinstance(style, str) and style
@@ -3674,7 +4528,13 @@ class ChatApp:
                 self.status = f"Error: unexpected server response type {kind!r}"
                 return
             self.scroll_offset = 0
-            save_sessions(self.data_file, self.sessions)
+            if kind in {"new", "login", "chat_skill", "style", "message", "message_retry"}:
+                save_sessions(self.data_file, self.sessions)
+            if kind in {"message", "message_retry"}:
+                session = self.active_session
+                if session is not None:
+                    if not self._sync_profile_chat_log(session):
+                        return
             if should_start_coding and (
                 self.coding_state.coding_mode == "auto"
                 or self._confirm_coding_mode()
@@ -3720,6 +4580,16 @@ class ChatApp:
                     )
                 else:
                     self.status = "Session authentication expired; log in again"
+            elif kind in {
+                "account_logout",
+                "knowledge_list",
+                "knowledge_add",
+                "knowledge_delete",
+            } and exc.status_code == 401:
+                self.account_access_token = ""
+                self.account_display_name = ""
+                self.knowledge_sources = []
+                self.status = "Account session expired; use /account login."
             elif kind in {"message", "message_retry"} and exc.status_code == 404:
                 if kind == "message_retry" and not self.pending_message:
                     self.status = "Message retry was cancelled"
@@ -3866,7 +4736,7 @@ def main() -> int:
     parser.add_argument(
         "--skip-tests",
         action="store_true",
-        help="start without running the test suite first",
+        help="disable the optional SUPER_BOT_RUN_TESTS startup checks",
     )
     args = parser.parse_args()
     if not preflight.ensure_tests_pass(args.skip_tests):

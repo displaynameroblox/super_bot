@@ -189,7 +189,7 @@ class ClientStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "chat_sessions.json"
             session = ChatSession(
-                "a", "Alex", "p", "log", 1, "tok", "http://s", {"t": "Teach."}
+                "a", "Alex", "p", "log", 1, "tok", "http://s", chat_skills={"t": "Teach."}
             )
             save_sessions(path, [session])
             self.assertEqual(load_sessions(path)[0].chat_skills, {"t": "Teach."})
@@ -257,7 +257,7 @@ class ClientCommandTests(unittest.TestCase):
         return app
 
     def session(self, skills=None) -> ChatSession:
-        return ChatSession("l", "Alex", "p", "", 7, "tok", "http://srv", dict(skills or {}))
+        return ChatSession("l", "Alex", "p", "", 7, "tok", "http://srv", chat_skills=dict(skills or {}))
 
     def test_create_saves_locally_and_never_contacts_the_server(self) -> None:
         app = self.make_app()
