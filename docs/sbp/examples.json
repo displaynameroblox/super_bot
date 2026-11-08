@@ -1,0 +1,653 @@
+[
+  {
+    "name": "session negotiation",
+    "method": "POST",
+    "path": "/sbp/v0.1/sessions",
+    "authorization": "Bearer SDK_BOOTSTRAP_TOKEN",
+    "request": {
+      "versions": [
+        "0.1"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "session_id": "SESSION_ID",
+      "version": "0.1",
+      "access_token": "SDK_SESSION_TOKEN",
+      "expires_at": 1700003600.0,
+      "principal_id": "sdk",
+      "agent_id": null
+    }
+  },
+  {
+    "name": "environment registration",
+    "method": "POST",
+    "path": "/sbp/v0.1/environments",
+    "authorization": "Bearer SDK_SESSION_TOKEN",
+    "request": {
+      "id": "lab",
+      "name": "Local environment",
+      "kind": "simulation",
+      "capabilities": [
+        {
+          "id": "navigation.move_to",
+          "version": "1",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "arrived": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "arrived"
+            ],
+            "additionalProperties": false
+          },
+          "permissions": [
+            "move"
+          ],
+          "constraints": {
+            "timeout_seconds": 60,
+            "max_concurrent": 8
+          },
+          "status": "available",
+          "cancellation": true
+        }
+      ]
+    },
+    "status": 200,
+    "response": {
+      "id": "lab",
+      "name": "Local environment",
+      "kind": "simulation",
+      "capabilities": [
+        {
+          "id": "navigation.move_to",
+          "version": "1",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "arrived": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "arrived"
+            ],
+            "additionalProperties": false
+          },
+          "permissions": [
+            "move"
+          ],
+          "constraints": {
+            "timeout_seconds": 60,
+            "max_concurrent": 8
+          },
+          "status": "available",
+          "cancellation": true
+        }
+      ],
+      "owner": "sdk"
+    }
+  },
+  {
+    "name": "independent agent registration",
+    "method": "POST",
+    "path": "/sbp/v0.1/agents",
+    "authorization": "Bearer OPERATOR_SESSION_TOKEN",
+    "request": {
+      "id": "agent-1",
+      "name": "Explorer",
+      "environments": [
+        "lab"
+      ],
+      "capabilities": [
+        "navigation.move_to"
+      ],
+      "knowledge_sources": [
+        "environment",
+        "experience",
+        "developer",
+        "user",
+        "shared",
+        "memory"
+      ]
+    },
+    "status": 200,
+    "response": {
+      "id": "agent-1",
+      "name": "Explorer",
+      "environments": [
+        "lab"
+      ],
+      "capabilities": [
+        "navigation.move_to"
+      ],
+      "knowledge_sources": [
+        "environment",
+        "experience",
+        "developer",
+        "user",
+        "shared",
+        "memory"
+      ],
+      "owner": "operator",
+      "status": "active"
+    }
+  },
+  {
+    "name": "partial observation",
+    "method": "POST",
+    "path": "/sbp/v0.1/environments/lab/observations",
+    "authorization": "Bearer SDK_SESSION_TOKEN",
+    "request": {
+      "id": "obs-1",
+      "agent_id": "agent-1",
+      "kind": "position",
+      "data": {
+        "x": 0
+      },
+      "observed_at": 1700000000.0
+    },
+    "status": 200,
+    "response": {
+      "sequence": 1,
+      "type": "observation",
+      "agent_id": "agent-1",
+      "environment_id": "lab",
+      "time": 1700000000.0,
+      "data": {
+        "id": "obs-1",
+        "agent_id": "agent-1",
+        "kind": "position",
+        "data": {
+          "x": 0
+        },
+        "observed_at": 1700000000.0
+      }
+    }
+  },
+  {
+    "name": "action request",
+    "method": "POST",
+    "path": "/sbp/v0.1/agents/agent-1/actions",
+    "authorization": "Bearer OPERATOR_SESSION_TOKEN",
+    "request": {
+      "id": "move-1",
+      "environment_id": "lab",
+      "capability": "navigation.move_to",
+      "version": "1",
+      "input": {
+        "x": 4
+      }
+    },
+    "status": 200,
+    "response": {
+      "id": "move-1",
+      "environment_id": "lab",
+      "capability": "navigation.move_to",
+      "version": "1",
+      "input": {
+        "x": 4
+      },
+      "agent_id": "agent-1",
+      "state": "queued",
+      "progress": 0.0,
+      "result": null,
+      "error": null,
+      "created_at": 1700000000.0,
+      "deadline": 1700000060.0,
+      "capability_snapshot": {
+        "id": "navigation.move_to",
+        "version": "1",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x"
+          ],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "arrived": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "arrived"
+          ],
+          "additionalProperties": false
+        },
+        "permissions": [
+          "move"
+        ],
+        "constraints": {
+          "timeout_seconds": 60,
+          "max_concurrent": 8
+        },
+        "status": "available",
+        "cancellation": true
+      }
+    }
+  },
+  {
+    "name": "poll outstanding actions",
+    "method": "GET",
+    "path": "/sbp/v0.1/environments/lab/actions",
+    "authorization": "Bearer SDK_SESSION_TOKEN",
+    "request": null,
+    "status": 200,
+    "response": [
+      {
+        "id": "move-1",
+        "environment_id": "lab",
+        "capability": "navigation.move_to",
+        "version": "1",
+        "input": {
+          "x": 4
+        },
+        "agent_id": "agent-1",
+        "state": "queued",
+        "progress": 0.0,
+        "result": null,
+        "error": null,
+        "created_at": 1700000000.0,
+        "deadline": 1700000060.0,
+        "capability_snapshot": {
+          "id": "navigation.move_to",
+          "version": "1",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "arrived": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "arrived"
+            ],
+            "additionalProperties": false
+          },
+          "permissions": [
+            "move"
+          ],
+          "constraints": {
+            "timeout_seconds": 60,
+            "max_concurrent": 8
+          },
+          "status": "available",
+          "cancellation": true
+        }
+      }
+    ]
+  },
+  {
+    "name": "acknowledged",
+    "method": "POST",
+    "path": "/sbp/v0.1/environments/lab/agents/agent-1/actions/move-1",
+    "authorization": "Bearer SDK_SESSION_TOKEN",
+    "request": {
+      "state": "acknowledged",
+      "progress": 0.0,
+      "result": null,
+      "error": null
+    },
+    "status": 200,
+    "response": {
+      "id": "move-1",
+      "environment_id": "lab",
+      "capability": "navigation.move_to",
+      "version": "1",
+      "input": {
+        "x": 4
+      },
+      "agent_id": "agent-1",
+      "state": "acknowledged",
+      "progress": 0.0,
+      "result": null,
+      "error": null,
+      "created_at": 1700000000.0,
+      "deadline": 1700000060.0,
+      "capability_snapshot": {
+        "id": "navigation.move_to",
+        "version": "1",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x"
+          ],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "arrived": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "arrived"
+          ],
+          "additionalProperties": false
+        },
+        "permissions": [
+          "move"
+        ],
+        "constraints": {
+          "timeout_seconds": 60,
+          "max_concurrent": 8
+        },
+        "status": "available",
+        "cancellation": true
+      }
+    }
+  },
+  {
+    "name": "running",
+    "method": "POST",
+    "path": "/sbp/v0.1/environments/lab/agents/agent-1/actions/move-1",
+    "authorization": "Bearer SDK_SESSION_TOKEN",
+    "request": {
+      "state": "running",
+      "progress": 0.5,
+      "result": null,
+      "error": null
+    },
+    "status": 200,
+    "response": {
+      "id": "move-1",
+      "environment_id": "lab",
+      "capability": "navigation.move_to",
+      "version": "1",
+      "input": {
+        "x": 4
+      },
+      "agent_id": "agent-1",
+      "state": "running",
+      "progress": 0.5,
+      "result": null,
+      "error": null,
+      "created_at": 1700000000.0,
+      "deadline": 1700000060.0,
+      "capability_snapshot": {
+        "id": "navigation.move_to",
+        "version": "1",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x"
+          ],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "arrived": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "arrived"
+          ],
+          "additionalProperties": false
+        },
+        "permissions": [
+          "move"
+        ],
+        "constraints": {
+          "timeout_seconds": 60,
+          "max_concurrent": 8
+        },
+        "status": "available",
+        "cancellation": true
+      }
+    }
+  },
+  {
+    "name": "completed",
+    "method": "POST",
+    "path": "/sbp/v0.1/environments/lab/agents/agent-1/actions/move-1",
+    "authorization": "Bearer SDK_SESSION_TOKEN",
+    "request": {
+      "state": "completed",
+      "progress": 1.0,
+      "result": {
+        "arrived": true
+      },
+      "error": null
+    },
+    "status": 200,
+    "response": {
+      "id": "move-1",
+      "environment_id": "lab",
+      "capability": "navigation.move_to",
+      "version": "1",
+      "input": {
+        "x": 4
+      },
+      "agent_id": "agent-1",
+      "state": "completed",
+      "progress": 1.0,
+      "result": {
+        "arrived": true
+      },
+      "error": null,
+      "created_at": 1700000000.0,
+      "deadline": 1700000060.0,
+      "capability_snapshot": {
+        "id": "navigation.move_to",
+        "version": "1",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x"
+          ],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "arrived": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "arrived"
+          ],
+          "additionalProperties": false
+        },
+        "permissions": [
+          "move"
+        ],
+        "constraints": {
+          "timeout_seconds": 60,
+          "max_concurrent": 8
+        },
+        "status": "available",
+        "cancellation": true
+      }
+    }
+  },
+  {
+    "name": "event page",
+    "method": "GET",
+    "path": "/sbp/v0.1/agents/agent-1/events",
+    "authorization": "Bearer OPERATOR_SESSION_TOKEN",
+    "request": null,
+    "status": 200,
+    "response": {
+      "events": [
+        {
+          "sequence": 1,
+          "type": "observation",
+          "agent_id": "agent-1",
+          "environment_id": "lab",
+          "time": 1700000000.0,
+          "data": {
+            "id": "obs-1",
+            "agent_id": "agent-1",
+            "kind": "position",
+            "data": {
+              "x": 0
+            },
+            "observed_at": 1700000000.0
+          }
+        },
+        {
+          "sequence": 2,
+          "type": "action.queued",
+          "agent_id": "agent-1",
+          "environment_id": "lab",
+          "time": 1700000000.0,
+          "data": {
+            "action_id": "move-1"
+          }
+        },
+        {
+          "sequence": 3,
+          "type": "action.acknowledged",
+          "agent_id": "agent-1",
+          "environment_id": "lab",
+          "time": 1700000000.0,
+          "data": {
+            "action_id": "move-1",
+            "progress": 0.0
+          }
+        },
+        {
+          "sequence": 4,
+          "type": "action.running",
+          "agent_id": "agent-1",
+          "environment_id": "lab",
+          "time": 1700000000.0,
+          "data": {
+            "action_id": "move-1",
+            "progress": 0.5
+          }
+        },
+        {
+          "sequence": 5,
+          "type": "action.completed",
+          "agent_id": "agent-1",
+          "environment_id": "lab",
+          "time": 1700000000.0,
+          "data": {
+            "action_id": "move-1",
+            "progress": 1.0
+          }
+        }
+      ],
+      "next_cursor": 5
+    }
+  },
+  {
+    "name": "unsupported capability",
+    "method": "POST",
+    "path": "/sbp/v0.1/agents/agent-1/actions",
+    "authorization": "Bearer OPERATOR_SESSION_TOKEN",
+    "request": {
+      "id": "unsupported-1",
+      "environment_id": "lab",
+      "capability": "unknown.action",
+      "version": "1",
+      "input": {}
+    },
+    "status": 422,
+    "response": {
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Capability or exact version is not advertised",
+        "retryable": false
+      }
+    }
+  },
+  {
+    "name": "unverified user claim",
+    "method": "POST",
+    "path": "/sbp/v0.1/agents/agent-1/knowledge",
+    "authorization": "Bearer OPERATOR_SESSION_TOKEN",
+    "request": {
+      "source": "user",
+      "content": "A user says the path is clear.",
+      "provenance": "conversation:sample",
+      "confidence": 0.3,
+      "verified": false,
+      "scope": "private",
+      "environment_id": null,
+      "shared_with": []
+    },
+    "status": 200,
+    "response": {
+      "source": "user",
+      "content": "A user says the path is clear.",
+      "provenance": "conversation:sample",
+      "confidence": 0.3,
+      "verified": false,
+      "scope": "private",
+      "environment_id": null,
+      "shared_with": [],
+      "id": "KNOWLEDGE_ID",
+      "owner": "operator",
+      "agent_id": "agent-1",
+      "created_at": 1700000000.0
+    }
+  }
+]

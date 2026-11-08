@@ -9,3 +9,5 @@ websockets>=14,<16
 packaging>=23
 
 windows-curses; platform_system == "Windows"
+
+jsonschema>=4.23,<5

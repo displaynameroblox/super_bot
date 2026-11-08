@@ -23,9 +23,11 @@ super-bot = "Ai.chat_app:main"
 super-bot-account = "Ai.account_app:main"
 super-bot-web = "Ai.web_client:main"
 super-bot-manager = "Ai.local_manager:main"
+super-bot-host = "Ai.universal.http:main"
+super-bot-mock = "Ai.universal.mock:main"
 
 [tool.setuptools]
-packages = ["Ai"]
+packages = ["Ai", "Ai.universal"]
 include-package-data = false
 
 [tool.setuptools.package-data]

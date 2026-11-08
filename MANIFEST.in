@@ -11,3 +11,5 @@ include docs/infrastructure-audit.md
 include docs/infrastructure-changelog.md
 
 recursive-include docs/releases *.md
+include docs/universal-migration.md
+recursive-include docs/sbp *.md *.json

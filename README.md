@@ -4,6 +4,25 @@ Public alpha of the local-first chat server, terminal and browser clients, and
 `super-bot-manager`. This is a prerelease; expect bugs and back up client data
 before upgrading. Python package version: `2.1.0a1`.
 
+## Universal framework core (SBP v0.1)
+
+Super-Bot's universal core supports independent agents and environment adapters.
+Roblox is an integration target, not the architectural boundary. The opt-in
+`super-bot-host` command runs a separate local HTTPS host with durable sessions,
+capability authorization, action queues, scoped knowledge and a minimal agent
+runtime. Existing chat/server/TUI commands retain their behavior.
+
+- [Local setup and authentication](docs/sbp/configuration.md)
+- [SBP specification](docs/sbp/specification.md), [HTTP API](docs/sbp/api-reference.md),
+  [OpenAPI](docs/sbp/openapi.json), [exact wire schemas](docs/sbp/schemas.json)
+- [External SDK guide](docs/sbp/adapter-guide.md) and [request/response examples](docs/sbp/examples.json)
+- [Migration assessment](docs/universal-migration.md), [checkpoints](docs/sbp/checkpoints.md)
+  and [completion report / remaining work](docs/sbp/completion-report.md)
+
+Run `python -m Ai.universal.demo` for a self-contained local HTTPS demonstration
+with mock game and robotics environments. No cloud services or models are needed.
+No Roblox SDK is included in this increment.
+
 ## Tested operating systems
 
 | Operating system | Alpha status |

@@ -1,0 +1,1191 @@
+{
+  "$defs": {
+    "Action": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "capability": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Capability",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Version",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Input",
+          "type": "object"
+        },
+        "agent_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "state": {
+          "default": "queued",
+          "enum": [
+            "queued",
+            "acknowledged",
+            "running",
+            "cancel_requested",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "progress": {
+          "default": 0.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Progress",
+          "type": "number"
+        },
+        "result": {
+          "$ref": "#/$defs/JsonValue",
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "deadline": {
+          "title": "Deadline",
+          "type": "number"
+        },
+        "capability_snapshot": {
+          "$ref": "#/$defs/Capability"
+        }
+      },
+      "required": [
+        "id",
+        "environment_id",
+        "capability",
+        "version",
+        "agent_id",
+        "created_at",
+        "deadline",
+        "capability_snapshot"
+      ],
+      "title": "Action",
+      "type": "object"
+    },
+    "ActionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "capability": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Capability",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Version",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Input",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "environment_id",
+        "capability",
+        "version"
+      ],
+      "title": "ActionRequest",
+      "type": "object"
+    },
+    "ActionUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "acknowledged",
+            "running",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "progress": {
+          "default": 0.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Progress",
+          "type": "number"
+        },
+        "result": {
+          "$ref": "#/$defs/JsonValue",
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "ActionUpdate",
+      "type": "object"
+    },
+    "Agent": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "environments": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Environments",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "knowledge_sources": {
+          "items": {
+            "enum": [
+              "environment",
+              "experience",
+              "developer",
+              "user",
+              "shared",
+              "memory"
+            ],
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Knowledge Sources",
+          "type": "array"
+        },
+        "owner": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Owner",
+          "type": "string"
+        },
+        "status": {
+          "default": "active",
+          "enum": [
+            "active",
+            "paused",
+            "stopped"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "owner"
+      ],
+      "title": "Agent",
+      "type": "object"
+    },
+    "AgentRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "environments": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Environments",
+          "type": "array"
+        },
+        "capabilities": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "knowledge_sources": {
+          "items": {
+            "enum": [
+              "environment",
+              "experience",
+              "developer",
+              "user",
+              "shared",
+              "memory"
+            ],
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Knowledge Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "AgentRequest",
+      "type": "object"
+    },
+    "AgentState": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "active",
+            "paused",
+            "stopped"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "AgentState",
+      "type": "object"
+    },
+    "AuditEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "time": {
+          "title": "Time",
+          "type": "number"
+        },
+        "principal_id": {
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "operation": {
+          "title": "Operation",
+          "type": "string"
+        },
+        "resource": {
+          "title": "Resource",
+          "type": "string"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sequence",
+        "time",
+        "principal_id",
+        "operation",
+        "resource",
+        "outcome"
+      ],
+      "title": "AuditEntry",
+      "type": "object"
+    },
+    "Capability": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Version",
+          "type": "string"
+        },
+        "input_schema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "output_schema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Output Schema",
+          "type": "object"
+        },
+        "permissions": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Permissions",
+          "type": "array"
+        },
+        "constraints": {
+          "$ref": "#/$defs/Constraints"
+        },
+        "status": {
+          "default": "available",
+          "enum": [
+            "available",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "cancellation": {
+          "default": false,
+          "title": "Cancellation",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "input_schema",
+        "output_schema"
+      ],
+      "title": "Capability",
+      "type": "object"
+    },
+    "Constraints": {
+      "additionalProperties": false,
+      "properties": {
+        "timeout_seconds": {
+          "default": 60,
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_concurrent": {
+          "default": 8,
+          "maximum": 128,
+          "minimum": 1,
+          "title": "Max Concurrent",
+          "type": "integer"
+        }
+      },
+      "title": "Constraints",
+      "type": "object"
+    },
+    "Diagnostic": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "Diagnostic",
+      "type": "object"
+    },
+    "Environment": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Kind",
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "maxItems": 64,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "owner": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Owner",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "owner"
+      ],
+      "title": "Environment",
+      "type": "object"
+    },
+    "EnvironmentRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Kind",
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/Capability"
+          },
+          "maxItems": 64,
+          "title": "Capabilities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "title": "EnvironmentRequest",
+      "type": "object"
+    },
+    "ErrorResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/Diagnostic"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "ErrorResponse",
+      "type": "object"
+    },
+    "Event": {
+      "additionalProperties": false,
+      "properties": {
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "type": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Type",
+          "type": "string"
+        },
+        "agent_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment Id"
+        },
+        "time": {
+          "title": "Time",
+          "type": "number"
+        },
+        "data": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Data",
+          "type": "object"
+        }
+      },
+      "required": [
+        "sequence",
+        "type",
+        "agent_id",
+        "time",
+        "data"
+      ],
+      "title": "Event",
+      "type": "object"
+    },
+    "EventPage": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "next_cursor": {
+          "title": "Next Cursor",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "events",
+        "next_cursor"
+      ],
+      "title": "EventPage",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "Knowledge": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "environment",
+            "experience",
+            "developer",
+            "user",
+            "shared",
+            "memory"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "provenance": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Provenance",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "scope": {
+          "default": "private",
+          "enum": [
+            "private",
+            "shared",
+            "environment"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "environment_id": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment Id"
+        },
+        "shared_with": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Shared With",
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "owner": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Owner",
+          "type": "string"
+        },
+        "agent_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        }
+      },
+      "required": [
+        "source",
+        "content",
+        "provenance",
+        "id",
+        "owner",
+        "agent_id",
+        "created_at"
+      ],
+      "title": "Knowledge",
+      "type": "object"
+    },
+    "KnowledgeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "environment",
+            "experience",
+            "developer",
+            "user",
+            "shared",
+            "memory"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "provenance": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Provenance",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "scope": {
+          "default": "private",
+          "enum": [
+            "private",
+            "shared",
+            "environment"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "environment_id": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment Id"
+        },
+        "shared_with": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Shared With",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "content",
+        "provenance"
+      ],
+      "title": "KnowledgeRequest",
+      "type": "object"
+    },
+    "MessageRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "recipient": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Recipient",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recipient",
+        "text"
+      ],
+      "title": "MessageRequest",
+      "type": "object"
+    },
+    "ObservationRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "agent_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Kind",
+          "type": "string"
+        },
+        "data": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Data",
+          "type": "object"
+        },
+        "observed_at": {
+          "title": "Observed At",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "agent_id",
+        "kind",
+        "data",
+        "observed_at"
+      ],
+      "title": "ObservationRequest",
+      "type": "object"
+    },
+    "ProtocolInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "versions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Versions",
+          "type": "array"
+        },
+        "transports": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Transports",
+          "type": "array"
+        }
+      },
+      "title": "ProtocolInfo",
+      "type": "object"
+    },
+    "SessionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "version": {
+          "const": "0.1",
+          "default": "0.1",
+          "title": "Version",
+          "type": "string"
+        },
+        "access_token": {
+          "title": "Access Token",
+          "type": "string"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "number"
+        },
+        "principal_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "agent_id": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        }
+      },
+      "required": [
+        "session_id",
+        "access_token",
+        "expires_at",
+        "principal_id"
+      ],
+      "title": "SessionGrant",
+      "type": "object"
+    },
+    "SessionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "versions": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Versions",
+          "type": "array"
+        }
+      },
+      "title": "SessionRequest",
+      "type": "object"
+    },
+    "Status": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "Status",
+      "type": "object"
+    },
+    "Task": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "agent_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "goal": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Goal",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "waiting",
+            "completed",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "action_ids": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Action Ids",
+          "type": "array"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "agent_id",
+        "goal",
+        "state"
+      ],
+      "title": "Task",
+      "type": "object"
+    },
+    "TaskRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "goal": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Goal",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/ActionRequest"
+          },
+          "maxItems": 16,
+          "title": "Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "title": "TaskRequest",
+      "type": "object"
+    }
+  },
+  "title": "SBP v0.1 wire contracts",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
