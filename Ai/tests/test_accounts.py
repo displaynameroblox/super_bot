@@ -242,7 +242,7 @@ class DatabaseTests(TempDatabaseCase):
             database, "LATEST_VERSION", new_migration[0]
         ):
             database.Database(self.path)
-            with sqlite3.connect(self.path) as connection:
+            with closing(sqlite3.connect(self.path)) as connection, connection:
                 self.assertEqual(database.schema_version(connection), new_migration[0])
                 connection.execute("SELECT * FROM extra")
         names = [info.path.name for info in backup.list_backups(self.path)]
@@ -256,14 +256,14 @@ class DatabaseTests(TempDatabaseCase):
         ):
             with self.assertRaises(database.DatabaseError):
                 database.Database(self.path, backup_before_migrate=False)
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection, connection:
             self.assertEqual(database.schema_version(connection), database.LATEST_VERSION - 0)
             self.assertIsNone(
                 connection.execute("SELECT name FROM sqlite_master WHERE name='ok'").fetchone()
             )
 
     def test_a_newer_database_is_refused_with_guidance(self) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection, connection:
             connection.execute("PRAGMA user_version = 999")
         with self.assertRaisesRegex(database.DatabaseError, "Update Super Bot"):
             database.Database(self.path)

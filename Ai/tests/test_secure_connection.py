@@ -428,7 +428,7 @@ class SecureConnectionTests(unittest.TestCase):
 
         with self.assertRaises(transport.TransportError) as caught:
             with transport.open_event_stream(
-                self.live.url, grant["session_ID"], "wrong-token"
+                self.live.url, grant["session_ID"], "wrong-token", open_timeout=15
             ):
                 self.fail("the stream should not open with a bad token")
 
