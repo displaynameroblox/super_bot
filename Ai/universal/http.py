@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import time
+import uuid
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -120,6 +121,17 @@ def create_app(host: Host, runtime=None) -> FastAPI:
         return JSONResponse(c.ErrorResponse(error=c.Diagnostic(code="internal_error", message="Host could not complete the operation")).model_dump(), status_code=500)
 
     prefix = "/sbp/v0.1"
+    with host.store.transaction():
+        node = host.store.get("metadata", "node")
+        if node is None:
+            node = {"node_id": f"nod_{uuid.uuid4()}"}
+            host.store.put("metadata", "node", node)
+
+    @app.get("/.well-known/superbot", response_model=c.NodeDescriptor)
+    def descriptor():
+        return {**node, "status": "ready", "sdk_versions": [],
+                "sbp_versions": c.ProtocolInfo().versions, "sbp_path": prefix,
+                "features": ["minecraft.private_chat"]}
 
     @app.get("/health", response_model=c.Status)
     def health():
@@ -128,6 +140,10 @@ def create_app(host: Host, runtime=None) -> FastAPI:
     @app.get(prefix + "/protocol", response_model=c.ProtocolInfo)
     def protocol():
         return c.ProtocolInfo()
+
+    @app.get(prefix + "/models", response_model=c.ModelRoutes)
+    def models(credential=Depends(token)):
+        return host.invoke(credential, "models", registered=tuple(runtime.models))
 
     @app.post(prefix + "/sessions", response_model=c.SessionGrant)
     def session(req: c.SessionRequest, credential=Depends(token)):
@@ -229,6 +245,14 @@ def create_app(host: Host, runtime=None) -> FastAPI:
     def tasks(agent_id: c.Id, credential=Depends(token)):
         return host.invoke(credential, "tasks", agent_id=agent_id)
 
+    @app.post(prefix + "/agents/{agent_id}/private-chat", response_model=c.PrivateChatReply)
+    async def private_chat(agent_id: c.Id, req: c.PrivateChatRequest, credential=Depends(token)):
+        return await runtime.private_chat(credential, agent_id, req)
+
+    @app.post(prefix + "/agents/{agent_id}/private-chat/reset", response_model=c.Status)
+    def reset_private_chat(agent_id: c.Id, req: c.PrivateChatScope, credential=Depends(token)):
+        return host.invoke(credential, "private_chat_reset", agent_id=agent_id, req=req)
+
     @app.get(prefix + "/audit", response_model=list[c.AuditEntry])
     def audit(after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100), credential=Depends(token)):
         return host.invoke(credential, "audit", after=after, limit=limit)
@@ -278,6 +302,12 @@ def main():
     host = Host(Store(args.data_dir / "sbp.sqlite3"), principals, limits)
     runtime = Runtime(host)
     if existing_provider:
+        # Match the existing chat server's environment loading, but only when
+        # the administrator explicitly enables the model bridge.
+        from dotenv import load_dotenv
+        load_dotenv(Path.cwd() / ".env")
+        if os.getenv("SUPER_BOT_MANAGED") != "1":
+            load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
         runtime.register_model("existing", ExistingProvider())
     print(f"SBP v0.1 HTTPS on {args.host}:{args.port}; certificate SHA-256: {material.fingerprint}")
     try:

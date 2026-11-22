@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"superbot","version":"${version}","name":"Super-Bot Minecraft","environment":"*","entrypoints":{"main":["io.superbot.minecraft.fabric.SuperBotMod"]},"depends":{"fabricloader":">=0.16.10","fabric-api":"*","minecraft":"1.21.1","java":">=21"}}

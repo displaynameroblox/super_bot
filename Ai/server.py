@@ -1349,6 +1349,13 @@ def start_server():
         access_error=event_access_error,
         stream_events=stream_session_events,
     )
+    sbp_store = None
+    sbp_config = os.getenv("SUPER_BOT_SBP_CONFIG", "").strip()
+    if sbp_config:
+        from Ai.universal.embedded import attach
+        sbp_data = Path(os.getenv("SUPER_BOT_SBP_DATA_DIR", "").strip() or (tls.server_data_dir() / "sbp"))
+        sbp_store = attach(secure_app, Path(sbp_config).expanduser(), sbp_data.expanduser())
+        print("Minecraft/SBP integration enabled on the existing HTTPS server.", flush=True)
     db = init_persistence()
     print(server_banner(host, port, material, identity, db.path, lan_enabled and not loopback), flush=True)
 
@@ -1363,17 +1370,21 @@ def start_server():
         daemon=True,
     )
     discovery_thread.start()
-    uvicorn.run(
-        secure_app,
-        host=host,
-        port=port,
-        ssl_certfile=str(material.certfile),
-        ssl_keyfile=str(material.keyfile),
-        ssl_keyfile_password=material.keyfile_password,
-        server_header=False,
-        # Keep heartbeats without expiring slow clients during phone inference.
-        ws_ping_timeout=None,
-    )
+    try:
+        uvicorn.run(
+            secure_app,
+            host=host,
+            port=port,
+            ssl_certfile=str(material.certfile),
+            ssl_keyfile=str(material.keyfile),
+            ssl_keyfile_password=material.keyfile_password,
+            server_header=False,
+            # Keep heartbeats without expiring slow clients during phone inference.
+            ws_ping_timeout=None,
+        )
+    finally:
+        if sbp_store is not None:
+            sbp_store.close()
 
 
 if __name__ == "__main__":

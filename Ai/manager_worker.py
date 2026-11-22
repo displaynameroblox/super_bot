@@ -8,6 +8,15 @@ from Ai.managed_model import local_model
 from Ai.manager_runtime import FileLock, atomic_json, read_json
 
 
+def write_telemetry(root, state):
+    """A full disk must not terminate the thread that handles shutdown."""
+    try:
+        atomic_json(root / 'telemetry.json', state)
+    except OSError:
+        return False
+    return True
+
+
 def main():
     root, source, build, startup = sys.argv[1:]
     root = Path(root)
@@ -37,7 +46,7 @@ def main():
                         runner.should_exit = True
                     if read_json(root / 'stop.json', {}).get('startup_id') == startup:
                         runner.should_exit = True
-                    atomic_json(root / 'telemetry.json', {
+                    write_telemetry(root, {
                         'startup_id': startup, 'sessions': len(server.chat_sessions),
                         'clients': sum(len(peers) for peers in tuple(server.event_manager.connections.values()))})
             thread = threading.Thread(target=control, daemon=True)

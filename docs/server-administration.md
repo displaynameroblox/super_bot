@@ -292,8 +292,8 @@ The bootstrap alone includes the explicitly pinned public key. Do not reuse
 application TLS/identity keys for release signing. Signing-key rotation requires
 a new trusted bootstrap/key distribution; automatic rotation is not implemented.
 
-In the admin dashboard or `admin --plain`, choose **Download Qwen3 4B**,
-**Download Qwen3 8B**, a Gemma preset (2B, 4B, or 9B), or
+In the admin dashboard or `admin --plain`, choose a Qwen3 preset (1.7B, 4B,
+or 8B), **Download Qwen3.5 2B**, a Gemma preset (2B, 4B, or 9B), or
 **Paste Hugging Face GGUF link**. Install the
 `models` extra first. Paste an HTTPS Hugging Face link to the GGUF file
 (the file page or its download link). Downloads go into the Super Bot data

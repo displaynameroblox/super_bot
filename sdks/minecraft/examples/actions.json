@@ -1,0 +1,6 @@
+{
+  "observe": {"id":"observe-001","environment_id":"minecraft-npc","capability":"minecraft.observe","version":"1","input":{}},
+  "move": {"id":"move-001","environment_id":"minecraft-npc","capability":"minecraft.move_to","version":"1","input":{"x":0,"y":64,"z":0}},
+  "stop": {"id":"stop-001","environment_id":"minecraft-npc","capability":"minecraft.stop","version":"1","input":{}},
+  "conversation_task": {"goal":"Tell me about the observed surroundings","model":"chatter","actions":[]}
+}

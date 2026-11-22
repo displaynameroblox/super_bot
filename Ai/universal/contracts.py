@@ -220,6 +220,39 @@ class ProtocolInfo(Wire):
     transports: list[str] = Field(default_factory=lambda: ["https-json-polling"])
 
 
+class NodeDescriptor(Wire):
+    node_id: Id
+    status: Literal["ready"]
+    sdk_versions: list[str]
+    sbp_versions: list[str]
+    sbp_path: Literal["/sbp/v0.1"]
+    features: list[str] = Field(default_factory=list)
+
+
+MinecraftUuid = Annotated[str, Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")]
+
+
+class PrivateChatScope(Wire):
+    environment_id: Id
+    world_id: MinecraftUuid
+    player_id: MinecraftUuid
+
+
+class PrivateChatRequest(PrivateChatScope):
+    request_id: MinecraftUuid
+    model: Id
+    text: Annotated[str, Field(min_length=1, max_length=1000, pattern=r"\S")]
+
+
+class PrivateChatReply(Wire):
+    conversation_id: Id
+    text: Text
+
+
+class ModelRoutes(Wire):
+    routes: list[Id]
+
+
 class AuditEntry(Wire):
     sequence: int
     time: float

@@ -365,7 +365,7 @@ def test_custom_capability_and_version_requires_no_core_change(world):
 def test_openapi_all_operations_have_typed_responses_and_auth(world):
     from Ai.universal.http import create_app
     spec = create_app(world.host).openapi()
-    public = {"/health", "/sbp/v0.1/protocol"}
+    public = {"/health", "/sbp/v0.1/protocol", "/.well-known/superbot"}
     for path, methods in spec["paths"].items():
         for operation in methods.values():
             assert operation["responses"]["200"]["content"]["application/json"]["schema"]

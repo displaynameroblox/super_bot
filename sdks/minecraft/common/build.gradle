@@ -1,0 +1,8 @@
+base { archivesName = 'superbot-minecraft-sdk' }
+dependencies { api 'com.google.code.gson:gson:2.11.0' }
+tasks.register('integrationProbe', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.superbot.minecraft.HttpsProbe'
+}
+test { outputs.dir(layout.buildDirectory.dir('fixtures')) }

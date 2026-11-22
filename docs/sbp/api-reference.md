@@ -6,8 +6,10 @@ All routes require HTTPS. `B` is an administrator-provisioned bootstrap bearer; 
 
 | Method | Path | Auth | Request body | Successful response (200) |
 | --- | --- | --- | --- | --- |
+| GET | `/.well-known/superbot` | Public | — | NodeDescriptor |
 | GET | `/health` | Public | — | Status |
 | GET | `/sbp/v0.1/protocol` | Public | — | ProtocolInfo |
+| GET | `/sbp/v0.1/models` | S | — | ModelRoutes |
 | POST | `/sbp/v0.1/sessions` | B | SessionRequest | SessionGrant |
 | POST | `/sbp/v0.1/sessions/reconnect` | S | — | SessionGrant |
 | DELETE | `/sbp/v0.1/sessions/{session_id}` | S | — | Status |
@@ -33,6 +35,8 @@ All routes require HTTPS. `B` is an administrator-provisioned bootstrap bearer; 
 | GET | `/sbp/v0.1/agents/{agent_id}/knowledge` | S | — | list[Knowledge] |
 | POST | `/sbp/v0.1/agents/{agent_id}/tasks` | S | TaskRequest | Task |
 | GET | `/sbp/v0.1/agents/{agent_id}/tasks` | S | — | list[Task] |
+| POST | `/sbp/v0.1/agents/{agent_id}/private-chat` | S | PrivateChatRequest | PrivateChatReply |
+| POST | `/sbp/v0.1/agents/{agent_id}/private-chat/reset` | S | PrivateChatScope | Status |
 | GET | `/sbp/v0.1/audit` | S | — | list[AuditEntry] |
 
 `GET /openapi.json` is also public. Event and audit reads accept `after` (integer ≥ 0, default 0) and `limit` (1–100, default 100). IDs match `[a-zA-Z0-9][a-zA-Z0-9_.:-]*` and are at most 96 characters. The schemas reject unknown object fields. Examples use placeholders for credentials; never commit real tokens.

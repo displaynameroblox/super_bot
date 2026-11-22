@@ -1,0 +1,17 @@
+allprojects {
+    group = 'io.superbot.minecraft'
+    version = '0.1.0-alpha.3'
+    repositories { mavenCentral() }
+}
+subprojects {
+    apply plugin: 'java-library'
+    java { toolchain { languageVersion = JavaLanguageVersion.of(21) }; withSourcesJar() }
+    tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 21 }
+    dependencies { testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'; testRuntimeOnly 'org.junit.platform:junit-platform-launcher' }
+    test { useJUnitPlatform() }
+    tasks.withType(AbstractArchiveTask).configureEach { preserveFileTimestamps = false; reproducibleFileOrder = true }
+}
+tasks.named('wrapper') {
+    gradleVersion = '8.10.2'
+    distributionSha256Sum = '31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26'
+}

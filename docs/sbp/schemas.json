@@ -917,6 +917,78 @@
       "title": "MessageRequest",
       "type": "object"
     },
+    "ModelRoutes": {
+      "additionalProperties": false,
+      "properties": {
+        "routes": {
+          "items": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Routes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "routes"
+      ],
+      "title": "ModelRoutes",
+      "type": "object"
+    },
+    "NodeDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "status": {
+          "const": "ready",
+          "title": "Status",
+          "type": "string"
+        },
+        "sdk_versions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sdk Versions",
+          "type": "array"
+        },
+        "sbp_versions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sbp Versions",
+          "type": "array"
+        },
+        "sbp_path": {
+          "const": "/sbp/v0.1",
+          "title": "Sbp Path",
+          "type": "string"
+        },
+        "features": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Features",
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "status",
+        "sdk_versions",
+        "sbp_versions",
+        "sbp_path"
+      ],
+      "title": "NodeDescriptor",
+      "type": "object"
+    },
     "ObservationRequest": {
       "additionalProperties": false,
       "properties": {
@@ -961,6 +1033,110 @@
         "observed_at"
       ],
       "title": "ObservationRequest",
+      "type": "object"
+    },
+    "PrivateChatReply": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_id",
+        "text"
+      ],
+      "title": "PrivateChatReply",
+      "type": "object"
+    },
+    "PrivateChatRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "world_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "World Id",
+          "type": "string"
+        },
+        "player_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Player Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "model": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Model",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "world_id",
+        "player_id",
+        "request_id",
+        "model",
+        "text"
+      ],
+      "title": "PrivateChatRequest",
+      "type": "object"
+    },
+    "PrivateChatScope": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "maxLength": 96,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "world_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "World Id",
+          "type": "string"
+        },
+        "player_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Player Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "world_id",
+        "player_id"
+      ],
+      "title": "PrivateChatScope",
       "type": "object"
     },
     "ProtocolInfo": {

@@ -64,10 +64,36 @@ def local_model(root, startup):
         port = listener.getsockname()[1]
     url = f'http://127.0.0.1:{port}/v1'
     key = secrets.token_urlsafe(32)
-    command = [executable, '--model', str(path), '--host', '127.0.0.1',
-               '--port', str(port), '--alias', 'superbot-phone', '--api-key', key]
+    command = [  # FOR THE TESTERS, THIS MATTERS THE MOST!
+    executable,
+    '--model', str(path),
+    '--host', '127.0.0.1',
+    '--port', str(port),
+    '--alias', 'superbot-phone',
+    '--api-key', key,
+
+    # Context and concurrency
+    '--ctx-size', '8192',
+    '--parallel', '1',
+
+    # CPU and GPU
+    '--threads', '4',
+    '--fit', 'on',
+    '--n-gpu-layers', '99',
+
+    # KV cache
+    '--cache-type-k', 'q8_0',
+    '--cache-type-v', 'q8_0',
+
+    # Sampling
+    '--temp', '0.7',
+
+    # Attention
+    '--flash-attn', 'on',
+]
     with (root / 'model.log').open('ab') as log:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+    bridge_environment = None
     try:
         with httpx.Client(timeout=0.5, trust_env=False) as client:
             while process.poll() is None:
@@ -83,11 +109,26 @@ def local_model(root, startup):
                     pass
                 time.sleep(0.2)
             else:
-                raise RuntimeError(f'Local model exited before becoming ready. See {root / "model.log"}.')
-        os.environ.update(PHONE_MODEL_PROVIDER='phone', PHONE_MODEL_BASE_URL=url,
-                          PHONE_MODEL_NAME='superbot-phone', TEST_PHONE_API_KEY=key)
+                raise RuntimeError(
+                                 f"Local model exited before becoming ready "
+                                 f"(exit code: {process.returncode}). "
+                                 f"See {root / 'model.log'}."
+                                )
+        if os.getenv('SUPER_BOT_SBP_CONFIG', '').strip():
+            # The opt-in Minecraft bridge reuses the selected managed model.
+            # Keep the existing non-bridge launcher behavior intact.
+            settings = {'PHONE_MODEL_PROVIDER': 'phone', 'PHONE_MODEL_BASE_URL': url,
+                        'PHONE_MODEL_NAME': 'superbot-phone', 'TEST_PHONE_API_KEY': key}
+            bridge_environment = {name: os.environ.get(name) for name in settings}
+            os.environ.update(settings)
         yield process
     finally:
+        if bridge_environment is not None:
+            for name, value in bridge_environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         if process.poll() is None:
             process.terminate()
             try:

@@ -21,6 +21,8 @@ ACTIONS = [('Status', 'status'), ('Start', 'start'), ('Stop', 'stop'), ('Restart
 
 
 MODEL_PRESETS = {
+    'qwen1.7': ('bartowski/Qwen_Qwen3-1.7B-GGUF', 'Qwen_Qwen3-1.7B-Q4_K_M.gguf'),
+    'qwen3.5-2': ('bartowski/Qwen_Qwen3.5-2B-GGUF', 'Qwen_Qwen3.5-2B-Q4_K_M.gguf'),
     'qwen4': ('Qwen/Qwen3-4B-GGUF', 'Qwen3-4B-Q4_K_M.gguf'),
     'qwen8': ('Qwen/Qwen3-8B-GGUF', 'Qwen3-8B-Q4_K_M.gguf'),
     'gemma2': ('bartowski/gemma-2-2b-it-GGUF', 'gemma-2-2b-it-Q4_K_M.gguf'),
@@ -28,6 +30,8 @@ MODEL_PRESETS = {
     'gemma9': ('bartowski/gemma-2-9b-it-GGUF', 'gemma-2-9b-it-Q4_K_M.gguf'),
 }
 ACTIONS += [
+    ('Download Qwen3 1.7B GGUF (~1.3 GB)', 'model download qwen1.7'),
+    ('Download Qwen3.5 2B GGUF (~1.4 GB)', 'model download qwen3.5-2'),
     ('Download Qwen3 4B GGUF (~2.5 GB)', 'model download qwen4'),
     ('Download Qwen3 8B GGUF (~5 GB)', 'model download qwen8'),
     ('Download Gemma 2 2B GGUF (~1.7 GB)', 'model download gemma2'),

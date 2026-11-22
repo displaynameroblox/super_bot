@@ -1,0 +1,38 @@
+name: Minecraft SDK
+on:
+  push:
+    paths: ['sdks/minecraft/**', 'Ai/universal/**', '.github/workflows/minecraft.yml']
+    tags: ['minecraft-v*']
+  pull_request:
+    paths: ['sdks/minecraft/**', 'Ai/universal/**', '.github/workflows/minecraft.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e . pytest
+      - run: ./gradlew build --no-daemon
+        working-directory: sdks/minecraft
+      - run: python sdks/minecraft/tools/check_contract.py
+        env:
+          PYTHONPATH: .
+      - run: python sdks/minecraft/tools/https_smoke.py
+        env:
+          PYTHONPATH: .
+      - run: python -m pytest Ai/tests/test_universal.py -q
+      - run: python sdks/minecraft/tools/package_release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: superbot-minecraft-alpha
+          path: sdks/minecraft/build/release/*

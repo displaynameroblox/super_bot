@@ -79,7 +79,7 @@ Capability constraints additionally bound concurrent outstanding actions per env
 
 ## Optional model routing
 
-The host defaults to no registered model routes. Tasks without `model` can dispatch explicit authorized action plans without inference. Set `"existing_model_provider": true` to expose route `existing` through `Ai.phone_model.chat`; grant `"models": ["existing"]` to selected principals. Configure the existing provider using its documented environment variables. SBP does not auto-load the chat server's `.env` or download models. A local provider keeps inference local; an external provider receives the bounded authorized context.
+The host defaults to no registered model routes. Tasks without `model` can dispatch explicit authorized action plans without inference. Set `"existing_model_provider": true` to expose route `existing` through `Ai.phone_model.chat`; grant `"models": ["existing"]` to selected principals. Configure the existing provider using its documented environment variables. When `existing_model_provider` is enabled, the standalone SBP host loads the same `.env` locations as the normal chat server; it does not download models. A local provider keeps inference local; an external provider receives the bounded authorized context.
 
 Embedders can call `Runtime.register_model(name, provider)` with any object implementing async `generate(messages) -> str`. Chatter tiers, local runtimes, coding or multimodal models can be integrated through this interface without changing SBP. Coding-provider wrappers must preserve the existing command/patch approval controls; none is auto-installed here.
 

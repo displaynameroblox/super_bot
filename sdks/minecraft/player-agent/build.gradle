@@ -1,0 +1,11 @@
+plugins { id 'application' }
+repositories {
+    maven { url = 'https://repo.opencollab.dev/maven-snapshots/' }
+    maven { url = 'https://repo.opencollab.dev/maven-releases/' }
+}
+dependencies {
+    implementation project(':common')
+    implementation 'org.geysermc.mcprotocollib:protocol:1.21-20241010.155958-24'
+    runtimeOnly 'org.slf4j:slf4j-simple:2.0.16'
+}
+application { mainClass = 'io.superbot.minecraft.player.Main'; applicationName = 'superbot-minecraft-player' }

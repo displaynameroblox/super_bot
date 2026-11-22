@@ -16,7 +16,8 @@ OPERATIONS = {
     "context", "reconnect", "revoke_session", "revoke_principal", "register_environment", "environments",
     "register_agent", "agents", "agent", "set_agent_state", "agent_session", "submit_action",
     "action", "cancel_action", "poll_actions", "update_action", "observe", "events", "message",
-    "put_knowledge", "knowledge", "set_knowledge_sources", "audit", "create_task", "finish_task", "tasks",
+    "put_knowledge", "knowledge", "set_knowledge_sources", "audit", "create_task", "finish_task", "tasks", "models",
+    "private_chat_begin", "private_chat_finish", "private_chat_reset",
 }
 
 
@@ -45,6 +46,10 @@ class Host:
         self.principals = {p.id: p for p in principals}
         # In-flight inference cannot safely be replayed after process death.
         with self.store.transaction():
+            for conversation in self.store.all("private_chat"):
+                if conversation["pending"]:
+                    conversation["pending"] = None
+                    self.store.put("private_chat", conversation["key"], conversation)
             for task in self.store.all("task"):
                 if task["state"] == "running":
                     task.update(state="failed", error=c.Diagnostic(code="host_restarted", message="Retry with a new task.").model_dump())
@@ -141,6 +146,56 @@ class Host:
     def _require_role(self, ctx, *roles):
         if ctx.agent_id or ctx.principal.role not in roles:
             fail("forbidden", "This credential cannot perform the operation", 403)
+
+    def _models(self, ctx, registered):
+        return {"routes": sorted(route for route in registered if ctx.principal.allows("models", route))}
+
+    def _private_chat_key(self, ctx, agent_id, req):
+        env = self._env_access(ctx, req.environment_id, execute=True)
+        agent = self._agent(ctx, agent_id)
+        if env["kind"] != "minecraft" or req.environment_id not in agent["environments"]:
+            fail("forbidden", "Agent is not registered in this Minecraft environment", 403)
+        return "/".join((ctx.principal.id, req.environment_id, agent_id, req.world_id, req.player_id))
+
+    def _private_chat_begin(self, ctx, agent_id, req):
+        key = self._private_chat_key(ctx, agent_id, req)
+        if not ctx.principal.allows("models", req.model):
+            fail("forbidden", "Model route is outside administrator grants", 403)
+        if self._agent(ctx, agent_id)["status"] != "active":
+            fail("agent_inactive", "Agent is not active", 409)
+        conversation = self.store.get("private_chat", key) or {
+            "key": key, "id": f"ses_{uuid.uuid4()}", "turns": [], "pending": None,
+        }
+        for turn in conversation["turns"]:
+            if turn["request_id"] == req.request_id:
+                if turn["text"] != req.text or turn["model"] != req.model:
+                    fail("conflict", "Request ID already used with different input", 409)
+                return {**conversation, "reply": turn["reply"]}
+        if conversation["pending"]:
+            fail("conversation_busy", "This conversation already has a pending reply", 409)
+        conversation["pending"] = req.request_id
+        self.store.put("private_chat", key, conversation)
+        return conversation
+
+    def _private_chat_finish(self, ctx, agent_id, req, conversation_id, reply):
+        key = self._private_chat_key(ctx, agent_id, req)
+        conversation = self.store.get("private_chat", key)
+        if (not conversation or conversation["id"] != conversation_id
+                or conversation["pending"] != req.request_id):
+            fail("conversation_closed", "Conversation was reset before the reply completed", 409)
+        if not ctx.principal.allows("models", req.model):
+            fail("forbidden", "Model route is outside administrator grants", 403)
+        conversation["turns"] = [*conversation["turns"], {
+            "request_id": req.request_id, "model": req.model, "text": req.text, "reply": reply,
+        }][-24:]
+        conversation["pending"] = None
+        self.store.put("private_chat", key, conversation)
+        return {"conversation_id": conversation_id, "text": reply}
+
+    def _private_chat_reset(self, ctx, agent_id, req):
+        key = self._private_chat_key(ctx, agent_id, req)
+        self.store.delete("private_chat", key)
+        return {"status": "reset"}
 
     def _get(self, kind, key):
         item = self.store.get(kind, key)

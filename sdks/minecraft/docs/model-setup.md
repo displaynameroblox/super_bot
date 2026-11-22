@@ -1,0 +1,7 @@
+# Chat and AI movement validation
+
+`/superbot chat <message>` sends a model task through the configured SBP model route (default `existing`) and displays its response to the requesting player. `/superbot move <request>` asks the model for a bounded destination and queues the existing `minecraft.move_to` capability. Both require a connected NPC and an explicitly configured model. The normal Super-Bot server does not itself supply model weights; it uses the same provider configured for ordinary Super-Bot chat. When the bridge is enabled, the manager passes its selected local model endpoint and credential to the server process.
+
+The normal HTTPS server can host SBP in the same process when `SUPER_BOT_SBP_CONFIG` points to an administrator-owned, mode-600 SBP configuration. Add `"existing_model_provider": true` and grant the adapter `models: ["existing"]`. Use the normal server's URL and TLS certificate in Modrinth. The bearer token and environment/capability/permission grants stay separate from chat account authentication.
+
+Automated tests use a fake provider and the actual backend state machine; they do not prove any particular local model follows the coordinate-only format. Small models may return explanations or invalid coordinates, which are rejected rather than executed. No persistent chat history, automatic chat capture, autonomous task loop, obstacle-aware LLM navigation, continuous follow, or guaranteed arrival is implemented. Keep worlds backed up when testing alpha software and test in a new singleplayer world first.
