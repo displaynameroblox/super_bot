@@ -158,6 +158,20 @@ def run(args, runtime, releases):
     if args.once or not sys.stdin.isatty() or not sys.stdout.isatty():
         print(json.dumps(snapshot(runtime, releases), indent=2))
         return 0
+    if not args.plain and not args.dashboard:
+        state = runtime.status()
+        if state['state'] == 'stopped':
+            execute(parser().parse_args(['start']), runtime, releases)
+            state = runtime.status()
+        if state['state'] != 'healthy':
+            raise ValueError('Managed server is unhealthy. Inspect super-bot-manager logs.')
+        host = state['probe_host']
+        if ':' in host:
+            host = f'[{host}]'
+        url = f"https://{host}:{state['port']}"
+        print(f"Discord: {state.get('discord', 'pending')} | "
+              f"Minecraft bridge: {state.get('minecraft_bridge', 'pending')}", flush=True)
+        return subprocess.call([sys.executable, '-m', 'Ai.chat_app', '--url', url])
     if args.plain or os.getenv('TERM') == 'dumb':
         return plain(runtime, releases)
     try:

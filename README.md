@@ -1,8 +1,8 @@
-# Super Bot — v2.1.0.alpha.1
+# Super-Bot Alpha 2 · 3.1.0a1
 
 Public alpha of the local-first chat server, terminal and browser clients, and
 `super-bot-manager`. This is a prerelease; expect bugs and back up client data
-before upgrading. Python package version: `2.1.0a1`.
+before upgrading. Python package version is `3.1.0a1`.
 
 ## Universal framework core (SBP v0.1)
 
@@ -52,8 +52,15 @@ TUI means the terminal interface. Windows support is experimental: successful
 installation and local-server use do not mean every workflow works. The cause of
 the silent crash and the lookup/download failures has not yet been established.
 
-See the [alpha release notes](docs/releases/v2.1.0.alpha.1.md).
+See the [alpha release notes](docs/releases/v3.1.0a1.md).
 
+
+## Miso and the game SDKs
+
+- [Discord setup](docs/discord-alpha.md)
+- [Shared Miso memory and privacy](docs/miso-memory.md)
+- [Cross-platform Miso setup](docs/miso-3.1.0a1.md)
+- [Minecraft Java SDK](sdks/minecraft/STARTUP_GUIDE.md)
 
 ## Server administration
 
@@ -85,22 +92,22 @@ cloud provider sends model context to that provider.
 
 ### 1. Download and install
 
-After the alpha is published, download `super_bot-2.1.0a1-py3-none-any.whl`
-from [the alpha release page](https://github.com/displaynameroblox/super_bot/releases/tag/v2.1.0.alpha.1).
+After the alpha is published, download `super_bot-3.1.0a1-py3-none-any.whl`
+from [the alpha release page](https://github.com/displaynameroblox/super_bot/releases/tag/v3.1.0a1).
 In Terminal, create an isolated environment and install the downloaded wheel:
 
 ```bash
 python3 -m venv "$HOME/super-bot-env"
 source "$HOME/super-bot-env/bin/activate"
 python -m pip install --upgrade pip
-python -m pip install "$HOME/Downloads/super_bot-2.1.0a1-py3-none-any.whl"
+python -m pip install "$HOME/Downloads/super_bot-3.1.0a1-py3-none-any.whl"
 super-bot-manager --help
 ```
 
 Alternatively, download and install the tagged source after the tag is published:
 
 ```bash
-git clone --branch v2.1.0.alpha.1 --depth 1 https://github.com/displaynameroblox/super_bot.git
+git clone --branch v3.1.0a1 --depth 1 https://github.com/displaynameroblox/super_bot.git
 cd super_bot
 python3 -m venv .venv
 source .venv/bin/activate
@@ -131,7 +138,7 @@ TEST_PHONE_API_KEY=your-model-server-key
 ```
 
 Use the actual endpoint and key for your model server. Wheel users can download
-[the configuration example](https://github.com/displaynameroblox/super_bot/blob/v2.1.0.alpha.1/.env.example)
+[the configuration example](https://github.com/displaynameroblox/super_bot/blob/v3.1.0a1/.env.example)
 or create `.env` manually. Then run:
 
 
@@ -180,7 +187,7 @@ and talks to the shared server. Don't port-forward the server to the internet.
 ### Publishing a release (maintainers)
 
 Follow the [release checklist](docs/releases/README.md). The release tag is
-`v2.1.0.alpha.1`; Python normalizes it to `2.1.0a1`. CI tests Linux and macOS,
+`v3.1.0a1`. CI runs on Linux, macOS and Windows,
 builds packages and signed server updates, and publishes a GitHub prerelease.
 Publishing requires the pinned public signing key and matching repository secret.
 

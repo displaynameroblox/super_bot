@@ -18,6 +18,7 @@ def build(root, output, key_path, version, channel):
     output.mkdir(parents=True, exist_ok=True)
     archive = output / 'super-bot-release.tar.gz'
     files = sorted([*root.joinpath('Ai').glob('*.py'), root / 'Ai' / 'requirements.txt',
+                    *root.joinpath('Ai', 'universal').glob('*.py'),
                     *root.joinpath('Ai', 'web').glob('*.html'),
                     *root.joinpath('Ai', 'web').glob('*.js'),
                     *root.joinpath('Ai', 'web').glob('*.css')])
@@ -32,7 +33,7 @@ def build(root, output, key_path, version, channel):
     manifest = {'format': 1, 'version': version, 'channel': channel,
                 'archive': archive.name, 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
                 'size': archive.stat().st_size, 'python': '>=3.10',
-                'platforms': ['darwin', 'linux'],
+                'platforms': ['darwin', 'linux', 'windows'],
                 'architectures': ['arm64', 'aarch64', 'x86_64', 'amd64', 'armv7l', 'i686', 'x86'],
                 'data_schema': 1, 'migrations': [],
                 'dependencies': [line for line in root.joinpath('Ai', 'requirements.txt').read_text().splitlines()

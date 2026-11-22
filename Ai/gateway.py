@@ -1,16 +1,11 @@
-"""Public entry point of the session server: HTTPS only and end-to-end encrypted.
-
-The network can reach /health, the server identity and the encrypted endpoints
-and nothing else. The real API lives in the inner app, which is called
-in-process with requests that were decrypted here, so it never answers a plain
-request, and a relay in front of the server cannot see which endpoint is used.
-"""
+"""Network entry point for sealed Super-Bot calls and an opt-in Roblox TLS bridge."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import os
 import re
@@ -25,6 +20,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from Ai import e2ee
+from Ai.miso_roblox import ROUTES as ROBLOX_ROUTES
 from Ai.protocol import E2EE_EVENTS_PATH, E2EE_IDENTITY_PATH, E2EE_PATH
 
 
@@ -36,6 +32,7 @@ ALLOWED_ROUTES = (
     ("POST", re.compile(r"/chat")),
     ("POST", re.compile(r"/style")),
     ("POST", re.compile(r"/skills")),
+    ("POST", re.compile(r"/miso/(search|remember|discord/(status|chat)|roblox/(status|chat))")),
     ("POST", re.compile(r"/sessions/leave")),
     ("GET", re.compile(r"/chat/[0-9]{1,18}")),
     (
@@ -81,20 +78,20 @@ def _parse_call(payload: Any) -> _Call | None:
     return _Call(method.upper(), path, authorization, payload.get("body"))
 
 
-async def _read_body(request: Request) -> bytes:
+async def _read_body(request: Request, limit: int = e2ee.MAX_REQUEST_BYTES) -> bytes:
     declared_length = request.headers.get("content-length")
     if declared_length is not None:
         try:
             declared_size = int(declared_length)
         except ValueError as exc:
             raise e2ee.InvalidEnvelope("Malformed Content-Length") from exc
-        if declared_size > e2ee.MAX_REQUEST_BYTES:
+        if declared_size > limit:
             raise e2ee.EnvelopeTooLarge("The request is too large")
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
-        if total > e2ee.MAX_REQUEST_BYTES:
+        if total > limit:
             raise e2ee.EnvelopeTooLarge("The request is too large")
         chunks.append(chunk)
     return b"".join(chunks)
@@ -256,6 +253,34 @@ def build_gateway(
         await stream_events(
             EncryptedEventSocket(websocket, exchange), session_id, authorization
         )
+
+    def register_roblox_route(path: str) -> None:
+        @gateway.post(path)
+        async def roblox_bridge(request: Request) -> JSONResponse:
+            headers = {"Cache-Control": "no-store"}
+            if os.environ.get("SUPER_BOT_ROBLOX_BRIDGE") != "1":
+                return JSONResponse({"detail": "Not Found"}, status_code=404, headers=headers)
+            if request.headers.get("content-type", "").split(";")[0] != "application/json":
+                return JSONResponse({"detail": "Expected JSON"}, status_code=415, headers=headers)
+            try:
+                body = json.loads(await _read_body(request, limit=16_384))
+            except e2ee.EnvelopeTooLarge:
+                return JSONResponse({"detail": "Request too large"}, status_code=413, headers=headers)
+            except (ValueError, RecursionError, e2ee.InvalidEnvelope):
+                return JSONResponse({"detail": "Malformed JSON request"}, status_code=400, headers=headers)
+            call = _parse_call({
+                "method": "POST", "path": path, "body": body,
+                "authorization": request.headers.get("authorization"),
+            })
+            if call is None:
+                return JSONResponse({"detail": "Invalid authorization header"}, status_code=400, headers=headers)
+            status, result = await _dispatch(inner_app, call)
+            if status == 422:
+                result = {"detail": "Invalid Roblox request"}
+            return JSONResponse(result, status_code=status, headers=headers)
+
+    for path in ROBLOX_ROUTES:
+        register_roblox_route(path)
 
     return gateway
 

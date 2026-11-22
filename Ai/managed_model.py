@@ -31,7 +31,7 @@ def selected_model_path(root):
         **dotenv_values(root / '.env'),
         **os.environ,
     }
-    if str(configuration.get('PHONE_MODEL_PROVIDER', '')).strip().lower() in {'openai', 'gemini'}:
+    if str(configuration.get('PHONE_MODEL_PROVIDER', '')).strip().lower() in {'openai', 'gemini', 'openrouter', 'groq'}:
         return None
     selection = read_json(root / 'model.json')
     return Path(selection['path']) if selection else None
@@ -48,7 +48,7 @@ def check_model_ready(root):
 
 
 @contextlib.contextmanager
-def local_model(root, startup):
+def local_model(root, startup, *, quiet=False, startup_timeout=None):
     path = selected_model_path(root)
     if path is None:
         yield None
@@ -91,12 +91,16 @@ def local_model(root, startup):
     # Attention
     '--flash-attn', 'on',
 ]
-    with (root / 'model.log').open('ab') as log:
+    log_path = Path(os.devnull) if quiet else root / 'model.log'
+    with log_path.open('ab') as log:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
     previous_environment = None
+    deadline = time.monotonic() + startup_timeout if startup_timeout else None
     try:
         with httpx.Client(timeout=0.5, trust_env=False) as client:
             while process.poll() is None:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError('Local model readiness check timed out.')
                 if (read_json(root / 'stop.json') or {}).get('startup_id') == startup:
                     raise RuntimeError('Local model startup was stopped.')
                 try:

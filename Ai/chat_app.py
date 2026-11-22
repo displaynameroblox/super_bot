@@ -123,12 +123,16 @@ PROFILES AND CHAT HISTORY
 /log load profile NAME        Use a profile's chat log when creating a session.
                               Quote names with spaces, e.g. "Friendly cat".
 /log clear                    Clear the staged starting chat log.
+/account link-discord ID      Link the selected Miso profile from your Discord DM.
+/account unlink-discord       Revoke Discord access to shared private memory.
+/account publish-miso         Publish the selected profile to your Miso account.
 /account login|logout|status  Sign in to an account for private knowledge and
                               locally saved chats. Account tokens are memory-only.
 /knowledge [list|add FILE [CATEGORY]|delete ID]
                               Manage private account knowledge from the Data tab.
 
 MESSAGES AND PROGRESS
+/handoff discord|minecraft    Check how to continue on another platform.
 /retry cancel                 Cancel a message retry waiting for its next
                               attempt. After a send failure, confirm to retry;
                               delays increase by 5 seconds each time.
@@ -692,6 +696,7 @@ def start_remote_session(
             "password": password,
             "AI_style": style,
             "AI_skills": skills or {},
+            "client_platform": "tui",
         },
         access_token=account_token,
     )
@@ -727,6 +732,7 @@ def send_message(
             "coding_context": coding_context,
             "show_progress": show_progress,
             "learn_from_chats": learn_from_chats,
+            "client_platform": "tui",
         },
         access_token=access_token,
     )
@@ -994,6 +1000,8 @@ class ChatApp:
             ("/export", "Export this conversation to a local file"),
             ("/connect", "Connect to a different server"),
             ("/setup", "Set up your profile"),
+            ("/handoff discord", "Check how to continue on Discord"),
+            ("/handoff minecraft", "Check how to continue in Minecraft"),
             ("/retry cancel", "Cancel a waiting message retry"),
             ("/quit", "Close Super Bot"),
         )
@@ -2806,7 +2814,14 @@ class ChatApp:
         if self.pending_message and action != "/retry":
             self.status = "Error: cancel the pending message retry before other commands"
             return
-        if action == "/new":
+        if action == "/handoff":
+            if len(parts) != 2 or parts[1].lower() not in ("discord", "minecraft"):
+                self.status = "Usage: /handoff discord|minecraft"
+            elif self.active_session is None:
+                self.status = "Error: create a session with /new first"
+            else:
+                self._send_chat_message(f"/handoff {parts[1].lower()}", self.active_session.server_session_id)
+        elif action == "/new":
             self.create_session()
         elif action == "/connect":
             self._connect_to_server()
@@ -3575,6 +3590,31 @@ class ChatApp:
                 f"Signed in as {self.account_display_name or 'your account'}."
                 if self.account_access_token
                 else "Not signed in. Use /account login to access private knowledge."
+            )
+            return
+        if action == "publish-miso":
+            if not self.account_access_token or self.future is not None:
+                self.status = "Sign in and wait for the current request before publishing your profile."
+                return
+            self.pending_kind = "miso_publish"
+            self.future = self.executor.submit(
+                request_json, self.base_url, "/accounts/miso/publish",
+                {"profile_name": self.profile_store.selected, "profiles_file": str(self.profiles_path)},
+                self.account_access_token,
+            )
+            return
+        if action.startswith("link-discord ") or action == "unlink-discord":
+            if not self.account_access_token or self.future is not None:
+                self.status = "Sign in and wait for the current request before changing your Discord link."
+                return
+            link = action != "unlink-discord"
+            self.pending_kind = "miso_link" if link else "miso_unlink"
+            self.future = self.executor.submit(
+                request_json, self.base_url,
+                "/accounts/miso/link" if link else "/accounts/miso/unlink",
+                {"discord_id": action.split(maxsplit=1)[1], "profile_name": self.profile_store.selected,
+                 "profiles_file": str(self.profiles_path)}
+                if link else {}, self.account_access_token,
             )
             return
         if action == "login":
@@ -4406,7 +4446,17 @@ class ChatApp:
                     or response_text(response, "username")
                 )
                 self.knowledge_sources = []
-                self.status = f"Signed in as {self.account_display_name}."
+                self.status = (
+                    f"Signed in as {self.account_display_name}. "
+                    "Start or reopen an account chat for shared Miso memory."
+                )
+            elif kind == "miso_publish":
+                self.status = "Published the selected profile to your shared Miso account."
+            elif kind == "miso_link":
+                code = response_text(response, "code")
+                self.status = f"/link {code}  (send in Miso DM within 10 min)"
+            elif kind == "miso_unlink":
+                self.status = "Discord access to shared Miso memory revoked."
             elif kind == "account_logout":
                 self.account_access_token = ""
                 self.account_display_name = ""
@@ -4522,7 +4572,10 @@ class ChatApp:
                     is_coding_request and self.pending_message_can_start_coding
                 )
                 session.chat_log = response_chat_log(response)
-                self.status = "Reply received and saved"
+                self.status = (
+                    "Guest chat · start an account chat for shared Miso memory"
+                    if response.get("local_guest_chat") is True else "Reply received and saved"
+                )
                 self._clear_pending_message()
             else:
                 self.status = f"Error: unexpected server response type {kind!r}"

@@ -49,7 +49,7 @@ class ReleaseTests(unittest.TestCase):
         self.public = self.temp / 'public.pem'
         self.public.write_text(self.pem)
         self.publish = self.temp / 'publish'
-        self.manifest = build(ROOT, self.publish, self.keypath, '2.2.0', 'stable')
+        self.manifest = build(ROOT, self.publish, self.keypath, '4.0.0', 'stable')
         self.releases.use('local', self.publish, self.public, True)
 
     def signed(self, **changes):
@@ -83,7 +83,7 @@ class ReleaseTests(unittest.TestCase):
                         {'architectures': ['alien']}, {'version': 'bad'}, {'size': -1},
                         {'dependencies': ['nonexistent-superbot-test-package>=1']},
                         {'dependencies': ['fastapi>=9999']}, {'archive': '../evil'},
-                        {'version': '2.2.0rc1'}):
+                        {'version': '2.0.0rc1'}):
             with self.subTest(changes=changes), self.assertRaises((ManagerError, ValueError)):
                 verify_manifest(*self.signed(**changes), self.pem, 'stable')
 
@@ -99,13 +99,33 @@ class ReleaseTests(unittest.TestCase):
     def test_official_uses_versioned_github_release_and_channel(self):
         response = [{'draft': False, 'prerelease': True, 'tag_name': 'v3.0.0rc1',
                      'assets': [{'name': n} for n in ('manifest.json', 'manifest.sig', ARCHIVE)]},
-                    {'draft': False, 'prerelease': False, 'tag_name': 'v2.2.0',
+                    {'draft': False, 'prerelease': False, 'tag_name': 'v2.0.0',
                      'assets': [{'name': n} for n in ('manifest.json', 'manifest.sig', ARCHIVE)]}]
         with patch('Ai.releases.fetch', return_value=json.dumps(response).encode()) as get:
             url = self.releases.base({'kind': 'official', 'channel': 'stable'})
-            self.assertTrue(url.endswith('/releases/download/v2.2.0'))
+            self.assertTrue(url.endswith('/releases/download/v2.0.0'))
             self.assertIn('api.github.com/repos/displaynameroblox/super_bot', get.call_args.args[0])
             self.assertTrue(self.releases.base({'kind': 'official', 'channel': 'development'}).endswith('v3.0.0rc1'))
+
+    def test_prerelease_decline_falls_back_before_archive_fetch(self):
+        pre = 'https://release.example/alpha'
+        stable = str(self.publish)
+        raw, signature = self.signed(version='3.1.0a1', channel='development')
+        candidates = [(pre, 'development'), (stable, 'stable')]
+
+        def fetch_asset(url, *args):
+            if url == f'{pre}/manifest.json':
+                return raw
+            if url == f'{pre}/manifest.sig':
+                return signature
+            self.assertFalse(str(url).startswith(pre))
+            return fetch(url, *args)
+
+        confirm = Mock(return_value=False)
+        with (patch.object(self.releases, 'candidates', return_value=iter(candidates)),
+              patch('Ai.releases.fetch', side_effect=fetch_asset)):
+            self.assertEqual(self.releases.check(confirm_prerelease=confirm), self.manifest)
+        confirm.assert_called_once_with('3.1.0a1')
 
     def test_timeout_and_permission_errors_leave_installation_untouched(self):
         for failure in (TimeoutError('test'), PermissionError('test')):
@@ -297,7 +317,7 @@ class LifecycleTests(unittest.TestCase):
         public = self.root / 'public.pem'
         public.write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
         publish = self.root / 'publish'
-        manifest = build(ROOT, publish, private, '2.2.0', 'stable')
+        manifest = build(ROOT, publish, private, '4.0.0', 'stable')
         releases = Releases(self.runtime)
         releases.use('local', publish, public, True)
         self.runtime.start()
@@ -313,7 +333,7 @@ class LifecycleTests(unittest.TestCase):
         shutil.copy2(ROOT / 'Ai' / 'requirements.txt', candidate_root / 'Ai' / 'requirements.txt')
         gateway = candidate_root / 'Ai' / 'gateway.py'
         gateway.write_text(gateway.read_text().replace('"status": "ok", "build": build', '"status": "wrong", "build": build'))
-        build(candidate_root, publish, private, '3.0.0', 'stable')
+        build(candidate_root, publish, private, '5.0.0', 'stable')
         self.runtime.timeout = 4
         with self.assertRaisesRegex(ManagerError, 'did not become ready'):
             releases.apply()

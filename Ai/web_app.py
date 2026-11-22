@@ -141,6 +141,7 @@ def build_web_app(backend: Backend, port: int) -> FastAPI:
                 "AI_persona": persona.strip()[:4000],
                 "AI_style": style.strip() if isinstance(style, str) else "",
                 "plr_name": name[:100],
+                "client_platform": "web",
             },
             token,
         )
@@ -159,7 +160,7 @@ def build_web_app(backend: Backend, port: int) -> FastAPI:
             or not message.strip()
         ):
             return reply(400, {"detail": "session_id and message are required"})
-        payload = {"ses_id": session_id, "msg": message.strip()[:1000], "show_progress": False}
+        payload = {"ses_id": session_id, "msg": message.strip()[:1000], "show_progress": False, "client_platform": "web"}
         for attempt in (1, 2):
             chat_token = chat_tokens.get((token, session_id))
             if chat_token is None:

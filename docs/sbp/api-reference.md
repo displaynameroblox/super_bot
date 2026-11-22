@@ -10,6 +10,8 @@ All routes require HTTPS. `B` is an administrator-provisioned bootstrap bearer; 
 | GET | `/health` | Public | — | Status |
 | GET | `/sbp/v0.1/protocol` | Public | — | ProtocolInfo |
 | GET | `/sbp/v0.1/models` | S | — | ModelRoutes |
+| GET | `/sbp/v0.1/environments/{environment_id}/agents/{agent_id}/movement-gate` | S | — | MovementGate |
+| PUT | `/sbp/v0.1/environments/{environment_id}/agents/{agent_id}/movement-gate` | S | MovementGate | MovementGate |
 | POST | `/sbp/v0.1/sessions` | B | SessionRequest | SessionGrant |
 | POST | `/sbp/v0.1/sessions/reconnect` | S | — | SessionGrant |
 | DELETE | `/sbp/v0.1/sessions/{session_id}` | S | — | Status |

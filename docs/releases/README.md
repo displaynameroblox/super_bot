@@ -1,7 +1,7 @@
-# Publishing v2.1.0.alpha.1
+# Publishing v3.1.0a1
 
-1. Review and commit the intended release changes. Package version is `2.1.0a1`;
-   the public Git tag is `v2.1.0.alpha.1`.
+1. Review and commit the intended release changes. Package version is `3.1.0a1`;
+   the public Git tag is `v3.1.0a1`.
 2. Run `python -m pytest Ai -q` and require Linux/macOS CI to pass.
 3. Provision `Ai/release-public.pem` and the matching RSA private key as the
    GitHub Actions secret `RELEASE_SIGNING_KEY`, following
@@ -12,8 +12,8 @@
 5. Commit the reviewed files, then publish the tag deliberately:
 
    ```sh
-   git tag v2.1.0.alpha.1
-   git push origin v2.1.0.alpha.1
+   git tag v3.1.0a1
+   git push origin v3.1.0a1
    ```
 
 6. Verify the workflow publishes a **prerelease** with the wheel, source archive,

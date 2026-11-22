@@ -7,14 +7,9 @@
         "$path": "src/shared"
       }
     },
-    "ReplicatedFirst": {
-      "clinet": {
-        "$path": "src/Main_src"
-      }
-    },
     "ServerScriptService": {
-      "Server": {
-        "$path": "src/server"
+      "Miso": {
+        "$path": "src/server/modules/miso_sdk.luau"
       }
     },
     "Workspace": {

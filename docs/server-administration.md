@@ -160,12 +160,14 @@ archive size and SHA-256. RSA PKCS#1 v1.5/SHA-256 signatures use the same
 cryptographic scheme as the legacy updater; the new manager uses Python
 cryptography rather than an external OpenSSL command.
 
-**Maintainer prerequisite:** this checkout does not contain an official release
-public key. Official update commands fail closed until a maintainer provisions
-`Ai/release-public.pem` and the corresponding GitHub Actions secret
-`RELEASE_SIGNING_KEY`. There is no insecure bypass. A bootstrap wheel still runs
-normally offline. Do not mistake implementation of the publisher for an already
-published signed release.
+Official updates use the public signing key pinned in `Ai/release-public.pem`.
+GitHub Actions signs release artifacts with the matching `RELEASE_SIGNING_KEY`.
+A missing key or invalid signature blocks installation.
+
+Normal startup works offline. Use `super-bot-manager start --auto-update` to
+try a signed stable update before starting a stopped instance. Interactive
+`update apply` asks before downloading a prerelease archive. Declining falls
+back to a stable release when available. Unattended updates skip prereleases.
 
 For developer builds, create/manage an RSA signing key outside the repository,
 export its public key, independently compare its SHA-256 fingerprint, then:

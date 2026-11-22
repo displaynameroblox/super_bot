@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "super-bot"
-version = "2.1.0a1"
+version = "3.1.0a1"
 description = "Local-first Super Bot chat server with accounts, encrypted clients and a local web client"
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["dependencies"]
 
 [project.optional-dependencies]
+discord = ["discord.py>=2.4,<3"]
 models = ["huggingface_hub>=0.27,<2"]
 pdf = ["pypdf>=5,<7"]
 
@@ -18,6 +19,7 @@ pdf = ["pypdf>=5,<7"]
 Homepage = "https://github.com/displaynameroblox/super_bot"
 
 [project.scripts]
+super-bot-discord = "Ai.discord_app:main"
 super-bot-server = "Ai.server:start_server"
 super-bot = "Ai.chat_app:main"
 super-bot-account = "Ai.account_app:main"

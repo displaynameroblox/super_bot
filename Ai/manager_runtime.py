@@ -121,7 +121,7 @@ class Runtime:
         result['state'] = ('healthy' if health(state) else 'unhealthy') if running else 'stopped'
         telemetry = read_json(self.root / 'telemetry.json', {}) if running else {}
         if telemetry.get('startup_id') == state.get('startup_id'):
-            result.update({k: telemetry[k] for k in ('clients', 'sessions') if k in telemetry})
+            result.update({k: telemetry[k] for k in ('clients', 'sessions', 'discord', 'minecraft_bridge') if k in telemetry})
         result['log'] = str(self.root / 'server.log')
         return result
 

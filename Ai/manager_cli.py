@@ -15,7 +15,7 @@ import time
 from Ai.manager_runtime import FileLock, ManagerError, Runtime, read_json
 from Ai.releases import Releases
 
-COMMANDS = {'init', 'start', 'stop', 'restart', 'status', 'logs', 'source', 'update', 'admin', 'remote', 'config'}
+COMMANDS = {'init', 'start', 'stop', 'restart', 'status', 'logs', 'source', 'update', 'admin', 'remote', 'config', 'doctor', 'debug'}
 
 
 def parser():
@@ -30,6 +30,8 @@ def parser():
     init.add_argument('--server-data', type=Path)
     start = sub.add_parser('start', help='start the installed server without checking the network')
     start.add_argument('--foreground', action='store_true')
+    start.add_argument('--auto-update', action='store_true',
+                       help='try a signed stable update before starting a stopped server')
     for command in ('stop', 'restart', 'status', 'config'):
         sub.add_parser(command)
     logs = sub.add_parser('logs')
@@ -49,11 +51,20 @@ def parser():
         update.add_parser(command).add_argument('--offline', action='store_true')
     update.add_parser('rollback')
     admin = sub.add_parser('admin')
+    admin.add_argument('--dashboard', action='store_true', help='open the administration dashboard')
     admin.add_argument('--plain', action='store_true', help='line-oriented keyboard menu')
     admin.add_argument('--once', action='store_true', help='print one snapshot and exit')
     remote = sub.add_parser('remote', help='run an allowlisted command over verified SSH')
     remote.add_argument('host', help='SSH host or configured SSH alias (known_hosts verification required)')
     remote.add_argument('action', choices=('status', 'start', 'stop', 'restart', 'logs', 'check', 'apply', 'rollback'))
+    sub.add_parser('doctor', help='inspect startup, platform and database health')
+    debug = sub.add_parser('debug', help='inspect sanitized developer diagnostics')
+    diagnostics = debug.add_subparsers(dest='action', required=True)
+    diagnostics.add_parser('platforms')
+    diagnostics.add_parser('prompts')
+    diagnostics.add_parser('trace').add_argument('--last', action='store_true', required=True)
+    scenarios = diagnostics.add_parser('test').add_subparsers(dest='scenario', required=True)
+    scenarios.add_parser('handoff').add_argument('--dry-run', action='store_true', required=True)
     return p
 
 
@@ -122,7 +133,17 @@ def execute(args, runtime, releases):
         if command == 'update':
             if args.action == 'rollback':
                 return releases.rollback()
+            if args.action == 'apply' and not args.json and sys.stdin.isatty():
+                def confirm(version):
+                    return input(f'Download and install prerelease {version}? [y/N] ').strip().lower() in ('y', 'yes')
+                return releases.apply(args.offline, confirm_prerelease=confirm)
             return getattr(releases, args.action)(args.offline)
+        if command == 'start' and getattr(args, 'auto_update', False):
+            if runtime.status()['state'] == 'stopped':
+                try:
+                    releases.apply(stable_only=True)
+                except (ManagerError, OSError, ValueError, http.client.HTTPException):
+                    print('Automatic stable update skipped. Run update check for details.', file=sys.stderr)
         if command in ('start', 'restart'):
             from Ai.managed_model import check_model_ready
             try:
@@ -147,6 +168,10 @@ def main(argv=None):
         if args.command == 'remote':
             result = subprocess.run(remote_command(args.host, args.action), timeout=600)
             return result.returncode
+        if args.command in ('doctor', 'debug'):
+            from Ai.developer_debug import inspect
+            print(json.dumps(inspect(args), indent=2))
+            return 0
         runtime = Runtime(args.instance, args.timeout)
         releases = Releases(runtime)
         if args.command == 'admin':

@@ -80,6 +80,12 @@ class TuiTests(unittest.TestCase):
         )]
         self.app.active_index = 0
 
+    def test_handoff_command_reaches_the_active_chat(self):
+        self.app._send_chat_message = Mock()
+        self.app.input_text = "/handoff Discord"
+        self.app.submit_input()
+        self.app._send_chat_message.assert_called_once_with("/handoff discord", 123)
+
     def test_all_views_and_palette_fit_small_and_large_terminals(self):
         for height, width in ((12, 40), (16, 50), (24, 80), (30, 120), (45, 180)):
             self.screen.height, self.screen.width = height, width

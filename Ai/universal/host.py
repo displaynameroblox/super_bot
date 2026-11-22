@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import time
 import uuid
 from jsonschema import Draft202012Validator
@@ -18,6 +19,7 @@ OPERATIONS = {
     "action", "cancel_action", "poll_actions", "update_action", "observe", "events", "message",
     "put_knowledge", "knowledge", "set_knowledge_sources", "audit", "create_task", "finish_task", "tasks", "models",
     "private_chat_begin", "private_chat_finish", "private_chat_reset",
+    "movement_gate",
 }
 
 
@@ -175,7 +177,34 @@ class Host:
             fail("conversation_busy", "This conversation already has a pending reply", 409)
         conversation["pending"] = req.request_id
         self.store.put("private_chat", key, conversation)
-        return conversation
+        return {**conversation, "character_dimension": self._character_dimension(agent_id, req.environment_id)}
+
+    def _character_dimension(self, agent_id, environment_id):
+        # Alpha 6 sends this observation only after sampling its live character.
+        cutoff = self.clock() - 10
+        for event in reversed(self.store.all("event")):
+            if (event["agent_id"], event["environment_id"], event["type"]) != (
+                agent_id, environment_id, "observation",
+            ):
+                continue
+            observation = event["data"]
+            if observation["kind"] != "minecraft.state":
+                continue
+            state = observation["data"]
+            dimension = state.get("dimension")
+            health = state.get("health")
+            perception = state.get("perception")
+            if (
+                event["time"] >= cutoff
+                and cutoff <= observation["observed_at"] <= event["time"] + 5
+                and type(health) in (int, float) and 0 < health < float("inf")
+                and isinstance(perception, dict) and perception.get("coverage") == "sampled"
+                and isinstance(dimension, str)
+                and re.fullmatch(r"[a-z0-9_.-]{1,48}:[a-z0-9_./-]{1,80}", dimension)
+            ):
+                return dimension
+            break
+        return None
 
     def _private_chat_finish(self, ctx, agent_id, req, conversation_id, reply):
         key = self._private_chat_key(ctx, agent_id, req)
@@ -346,6 +375,8 @@ class Host:
         if cap is None:
             fail("unsupported_capability", "Capability or exact version is not advertised", 422)
         self._authorize_action(agent, env["id"], cap)
+        if req.capability == "minecraft.move_to" and self._movement_paused(env["id"], agent_id):
+            fail("movement_paused", "NPC movement is stopped; resume it before submitting movement", 409)
         self._validate_data(cap["input_schema"], req.input)
         self._quota("action", "agent_id", agent_id, self.limits.max_actions_per_agent)
         pending = [self._refresh(a) for a in self.store.all("action") if a["environment_id"] == env["id"] and a["capability"] == cap["id"]]
@@ -386,6 +417,31 @@ class Host:
         self._agent(ctx, agent_id)
         return self._refresh(self._get("action", f"{agent_id}/{action_id}"))
 
+    def _movement_paused(self, environment_id, agent_id):
+        return self.store.get("movement_gate", f"{environment_id}/{agent_id}") is not None
+
+    def _movement_gate(self, ctx, environment_id, agent_id, req=None):
+        env = self._env_access(ctx, environment_id, execute=True)
+        agent = self._agent(ctx, agent_id)
+        if env["kind"] != "minecraft" or environment_id not in agent["environments"]:
+            fail("forbidden", "Agent is not registered in this Minecraft environment", 403)
+        key = f"{environment_id}/{agent_id}"
+        if req is None:
+            return {"paused": self._movement_paused(environment_id, agent_id)}
+        if not all(ctx.principal.allows(grant, "minecraft.stop") for grant in ("capabilities", "permissions")):
+            fail("forbidden", "Adapter is not granted Minecraft stop", 403)
+        if not req.paused:
+            self.store.delete("movement_gate", key)
+            return {"paused": False}
+        self.store.put("movement_gate", key, {"paused": True})
+        for action in self.store.all("action"):
+            if (action["environment_id"] == environment_id and action["agent_id"] == agent_id
+                    and action["capability"] == "minecraft.move_to" and action["state"] not in TERMINAL):
+                action["state"] = "cancelled"
+                self.store.put("action", f"{agent_id}/{action['id']}", action)
+                self._event(agent_id, "action.cancelled", {"action_id": action["id"]}, environment_id)
+        return {"paused": True}
+
     def _cancel_action(self, ctx, agent_id, action_id):
         action = self._action(ctx, agent_id, action_id)
         if action["state"] in TERMINAL or action["state"] == "cancel_requested":
@@ -413,6 +469,8 @@ class Host:
             return action  # replay of last successful update
         edges = {"queued": {"acknowledged", "failed"}, "acknowledged": {"running", "completed", "failed"},
                  "running": {"running", "completed", "failed"}, "cancel_requested": {"cancelled", "failed", "completed"}}
+        if action["capability"] == "minecraft.move_to":
+            edges["running"].add("cancelled")
         if req.state not in edges.get(action["state"], set()):
             fail("invalid_transition", "Action state transition is not allowed", 409)
         if req.progress < action["progress"]:

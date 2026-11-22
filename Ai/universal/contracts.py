@@ -253,6 +253,10 @@ class ModelRoutes(Wire):
     routes: list[Id]
 
 
+class MovementGate(Wire):
+    paused: bool
+
+
 class AuditEntry(Wire):
     sequence: int
     time: float

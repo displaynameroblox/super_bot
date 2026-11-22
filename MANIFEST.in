@@ -13,3 +13,9 @@ include docs/infrastructure-changelog.md
 recursive-include docs/releases *.md
 include docs/universal-migration.md
 recursive-include docs/sbp *.md *.json
+include .discord.env.example
+include docs/discord-alpha.md
+global-exclude .discord.env discord.sqlite3 discord.sqlite3-*
+include docs/miso-memory.md
+include docs/miso-control-integration.md
+include docs/miso-3.1.0a1.md

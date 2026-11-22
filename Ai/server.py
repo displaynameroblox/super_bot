@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from itertools import count
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -31,11 +31,17 @@ from Ai import (
     e2ee,
     gateway,
     knowledge,
+    miso_discord,
+    miso_memory,
+    miso_roblox,
     phone_model,
     profile_store,
     session_store,
     tls,
 )
+from Ai.environment_context import chat_environment
+from Ai.developer_debug import dispatch, trace_turn
+from Ai.platform_routing import destination, live_availability
 from Ai.protocol import (
     DISCOVERY_PORT,
     DISCOVERY_REQUEST,
@@ -155,6 +161,7 @@ class start_ses_req(BaseModel):
     AI_skills: dict[str, str] = Field(default_factory=dict)
 
     resume: bool = False
+    client_platform: Literal["tui", "web"] | None = None
     messages: list[dict[str, str]] = Field(default_factory=list, max_length=100)
 
     @field_validator("messages")
@@ -208,6 +215,8 @@ class Chatreg(BaseModel):
     show_progress: bool = True
     learn_from_chats: bool = False
     knowledge_context: str = Field(default="", max_length=6000)
+    private_memory_context: str = Field(default="", max_length=5500)
+    client_platform: Literal["tui", "web"] | None = None
 
 
 class SessionEventManager:
@@ -448,9 +457,31 @@ def generate_reply(
     coding_context: str = "",
     current_message: str = "",
     knowledge_context: str = "",
+    *,
+    client_platform: Literal["tui", "web"] | None = None,
 ) -> AssistantResponse:
+    with trace_turn(client_platform or "api") as trace:
+        handoff = dispatch(trace, current_message, live_availability)
+        if handoff:
+            return AssistantResponse(reply=handoff.reply, is_coding_request=False)
+        return _generate_model_reply(
+            session, chat_log, coding_context, current_message, knowledge_context, client_platform, trace,
+        )
+
+
+def _generate_model_reply(session, chat_log, coding_context, current_message, knowledge_context, client_platform, trace):
+    platform = {"tui": "Super-Bot terminal (TUI)", "web": "Super-Bot web client"}.get(client_platform)
+    context = (
+        f"The client identifies this conversation as {platform}."
+        if platform else "The API client did not identify its interface."
+    )
+    environment = chat_environment(
+        platform or "Super-Bot chat API",
+        f"{context} This request reached the Super-Bot node. "
+        "No Discord or Minecraft connection was verified for this turn.",
+    )
     system_instruction = (
-        f"{session.AI_persona[:1_000]}\n\n"
+        f"{environment}\n\n{session.AI_persona[:4_000]}\n\n"
         "Be warm, natural, and conversational, like a friendly project buddy. "
         "Do not claim to be human or invent personal experiences. Prefer "
         "concise, direct replies and ask a follow-up when it would help. "
@@ -490,7 +521,17 @@ def generate_reply(
         {"role": "system", "content": system_instruction},
         *(bounded_messages(session.messages, current_message) if session.messages else _conversation_messages(chat_log, current_message)),
     ]
+    trace["layers"] = [
+        "environment", "persona", "reply_contract",
+        *(["training"] if training_context else []),
+        *(["knowledge"] if knowledge_context else []),
+        *(["style"] if session.AI_style else []),
+        *(["skills"] if session.AI_skills else []),
+        "display_name", "coding_context", "chat_rules",
+        *(["history"] if len(messages) > 2 else []), "request",
+    ]
     for attempt in range(2):
+        trace["model_attempts"] = attempt + 1
         response_text = phone_model.chat(messages, response_schema=AssistantResponse.model_json_schema())
         # Some model servers wrap otherwise valid JSON in a Markdown fence.
         candidate = response_text.strip()
@@ -955,6 +996,101 @@ def client_owned_knowledge():
     raise HTTPException(status_code=410, detail="Knowledge is stored by the client. Update your client.")
 
 
+class MisoSearchRequest(BaseModel):
+    query: str = Field(default="", max_length=1000)
+
+
+class MisoNoteRequest(BaseModel):
+    request_id: str = Field(min_length=16, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    text: str = Field(min_length=1, max_length=4000)
+
+
+@lru_cache(maxsize=1)
+def _memory_api_database(path: str):
+    return database.Database(Path(path).expanduser())
+
+
+def require_memory_api():
+    path = os.environ.get("SUPER_BOT_MEMORY_API_DB", "").strip()
+    if not path or not Path(path).expanduser().is_file():
+        raise HTTPException(status_code=404, detail="Memory API disabled")
+    try:
+        db = _memory_api_database(path)
+        if miso_memory.MemoryStore.enabled(db) is None:
+            raise HTTPException(status_code=404, detail="Memory API disabled")
+    except (OSError, database.DatabaseError):
+        raise HTTPException(status_code=503, detail="Memory database unavailable") from None
+    return miso_memory.DeviceMemory(db)
+
+
+@app.post("/miso/search")
+def miso_search(req: MisoSearchRequest, authorization: str | None = Header(default=None)):
+    memory = require_memory_api()
+    try:
+        rows = memory.device_search(bearer_token(authorization), req.query)
+    except miso_memory.AccessDenied:
+        raise HTTPException(status_code=403, detail="An authorized memory device is required") from None
+    return {"memories": [
+        {field: row[field] for field in ("source", "thread_id", "created_at", "prompt", "reply")}
+        for row in rows
+    ]}
+
+
+@app.post("/miso/remember")
+def miso_remember(req: MisoNoteRequest, authorization: str | None = Header(default=None)):
+    memory = require_memory_api()
+    try:
+        memory.device_note(bearer_token(authorization), req.request_id, req.text)
+    except miso_memory.AccessDenied:
+        raise HTTPException(status_code=403, detail="An authorized memory device is required") from None
+    return {"ok": True}
+
+
+@app.post("/miso/discord/status")
+def miso_discord_status(authorization: str | None = Header(default=None)):
+    miso_discord.authorize(bearer_token(authorization))
+    miso_discord.backend(require_memory_api().db)
+    try:
+        return {"status": "ok", "model": phone_model.provider_description()}
+    except phone_model.PhoneModelError:
+        raise HTTPException(503, "Reply provider configuration invalid") from None
+
+
+@app.post("/miso/discord/chat")
+def miso_discord_chat(req: miso_discord.DiscordMessage, authorization: str | None = Header(default=None)):
+    miso_discord.authorize(bearer_token(authorization))
+    backend = miso_discord.backend(require_memory_api().db)
+    identity = miso_discord.Identity(req.user_id, req.channel_id, req.guild_id)
+    try:
+        return {"reply": backend.reply(identity, req.message_id, req.text)}
+    except phone_model.ProviderError as exc:
+        raise HTTPException(429 if exc.status == 429 else 503, "Reply provider unavailable") from None
+    except phone_model.PhoneModelError:
+        raise HTTPException(503, "Reply provider unavailable") from None
+    except miso_memory.AccessDenied:
+        raise HTTPException(403, "Discord identity changed") from None
+
+
+def require_roblox():
+    if os.environ.get("SUPER_BOT_ROBLOX_BRIDGE") != "1":
+        raise HTTPException(404, "Roblox bridge disabled")
+    db = require_memory_api().db
+    with db.read_connection() as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='miso_roblox_grants'").fetchone():
+            raise HTTPException(503, "Initialize the Roblox bridge database")
+    return miso_roblox.RobloxMemory(db)
+
+
+@app.post("/miso/roblox/status")
+def miso_roblox_status(req: miso_roblox.RobloxStatus, authorization: str | None = Header(default=None)):
+    return require_roblox().status(bearer_token(authorization), req)
+
+
+@app.post("/miso/roblox/chat")
+def miso_roblox_chat(req: miso_roblox.RobloxChat, authorization: str | None = Header(default=None)):
+    return require_roblox().chat(bearer_token(authorization), req)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -993,7 +1129,10 @@ async def start_ses(req: start_ses_req, authorization: str | None = Header(defau
     try:
         if not req.resume:
             async with inference_slot():
-                assistant_response = await asyncio.to_thread(generate_reply, session, session.Chat_log)
+                assistant_response = await asyncio.to_thread(
+                    generate_reply, session, session.Chat_log,
+                    **({"client_platform": req.client_platform} if req.client_platform else {}),
+                )
             session.Chat_log = f"{session.Chat_log}\n{timestamped_message('AI', assistant_response.reply)}".strip()
             session.messages.append({"role": "assistant", "content": assistant_response.reply})
         chat_sessions[session_id] = session
@@ -1078,6 +1217,12 @@ async def chat(req: Chatreg, authorization: str | None = Header(default=None)):
     sender_id = access_token_id(authorization)
     if sender_id is None:
         raise HTTPException(status_code=401, detail="Valid session login required")
+    if req.private_memory_context:
+        parent = session_account_tokens.get(sender_id)
+        owner = session_owners.get(req.ses_id)
+        signed_in = account_service.authenticate(parent) if parent and account_service else None
+        if signed_in is None or signed_in.id != owner:
+            raise HTTPException(status_code=403, detail="Private memory requires an authenticated private chat")
     host_id = session_hosts.get(req.ses_id)
     recipients = {host_id} if host_id is not None else set()
     if req.show_progress:
@@ -1110,9 +1255,12 @@ async def chat(req: Chatreg, authorization: str | None = Header(default=None)):
             ).strip()
             await publish_progress("drafting_reply")
             global model_slots
-            async with inference_slot():
+            slot = contextlib.nullcontext() if destination(req.msg) else inference_slot()
+            async with slot:
                 assistant_response = await asyncio.to_thread(
-                    generate_reply, session, session.Chat_log, req.coding_context, req.msg, req.knowledge_context,
+                    generate_reply, session, session.Chat_log, req.coding_context, req.msg,
+                    "\n\n".join(filter(None, (req.knowledge_context, req.private_memory_context))),
+                    **({"client_platform": req.client_platform} if req.client_platform else {}),
                 )
             if chat_sessions.get(req.ses_id) is not session:
                 raise HTTPException(status_code=410, detail="Session ended while replying")

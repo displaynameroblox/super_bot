@@ -179,45 +179,84 @@ class Releases:
         return {k: v for k, v in config.items() if k != 'key'}
 
     def base(self, config):
+        for url, _ in self.candidates(config):
+            return url
+        raise ManagerError('release_missing', 'No signed release is published for this channel.')
+
+    def candidates(self, config):
         if config['kind'] != 'official':
-            return config['location']
+            yield config['location'], config['channel']
+            return
         endpoint = f'https://api.github.com/repos/{REPOSITORY}/releases'
         releases = json.loads(fetch(endpoint, 1024 * 1024))
         for release in releases:
-            if release['draft'] or (config['channel'] == 'stable' and release['prerelease']):
+            if release['draft']:
                 continue
             tag = release['tag_name']
             if not re.fullmatch(r'v[0-9][A-Za-z0-9.+-]*', tag):
                 continue
+            try:
+                prerelease = release['prerelease'] or Version(tag[1:]).is_prerelease
+            except ValueError:
+                continue
+            channel = 'development' if prerelease else 'stable'
+            if config['channel'] == 'stable' and prerelease:
+                continue
             names = {asset['name'] for asset in release['assets']}
             if {'manifest.json', 'manifest.sig', ARCHIVE} <= names:
-                return f'https://github.com/{REPOSITORY}/releases/download/{tag}'
-        raise ManagerError('release_missing', 'No signed release is published for this channel.')
+                yield f'https://github.com/{REPOSITORY}/releases/download/{tag}', channel
 
-    def check(self, offline=False):
+    def check(self, offline=False, confirm_prerelease=None, *, stable_only=False):
         config = self.config()
+        if stable_only:
+            config = {**config, 'channel': 'stable'}
+            confirm_prerelease = None
         key = config.get('key')
         if not key:
             pinned = Path(__file__).with_name('release-public.pem')
             key = pinned.read_text(encoding='ascii') if pinned.is_file() else None
         if not key:
             raise ManagerError('trust', 'Official signing key is not provisioned; see the release setup guide.')
+        active = read_json(self.root / 'active.json')
+        current = active['version'] if active else metadata.version('super-bot')
         if offline:
             cached = read_json(self.root / 'checked.json')
             if not cached:
                 raise ManagerError('cache', 'No verified update is cached.')
             raw, signature = base64.b64decode(cached['raw']), base64.b64decode(cached['signature'])
             base = None
+            channel = cached.get('channel', config['channel'])
+            if channel != config['channel'] and not (
+                config['kind'] == 'official' and (channel == 'stable' or confirm_prerelease)
+            ):
+                raise ManagerError('manifest', 'Cached release belongs to a different channel.')
+            manifest = verify_manifest(raw, signature, key, channel)
+            if channel == 'development' and not (
+                confirm_prerelease and confirm_prerelease(manifest['version'])
+            ):
+                raise ManagerError('prerelease', 'Prerelease installation requires confirmation.')
         else:
-            base = self.base(config)
-            raw = fetch(f'{base}/manifest.json', 65536)
-            signature = fetch(f'{base}/manifest.sig', 16384)
-        manifest = verify_manifest(raw, signature, key, config['channel'])
-        active = read_json(self.root / 'active.json')
-        current = active['version'] if active else metadata.version('super-bot')
+            discovery = config
+            if config['kind'] == 'official' and confirm_prerelease:
+                discovery = {**config, 'channel': 'development'}
+            for base, channel in self.candidates(discovery):
+                if channel == 'development' and not confirm_prerelease:
+                    continue
+                raw = fetch(f'{base}/manifest.json', 65536)
+                signature = fetch(f'{base}/manifest.sig', 16384)
+                manifest = verify_manifest(raw, signature, key, channel)
+                if channel == 'development':
+                    if Version(manifest['version']) < Version(current):
+                        continue
+                    if not confirm_prerelease(manifest['version']):
+                        confirm_prerelease = None
+                        continue
+                break
+            else:
+                raise ManagerError('release_missing', 'No eligible signed release found.')
         if Version(manifest['version']) < Version(current):
             raise ManagerError('downgrade', 'Downgrade rejected. Use update rollback for the previous verified release.')
-        if active and config['channel'] == 'stable' and Version(manifest['version']) == Version(current) and manifest['sha256'] != active['sha256']:
+        if active and channel == 'stable' and Version(manifest['version']) == Version(current) and manifest['sha256'] != active['sha256']:
             raise ManagerError('immutable', 'A stable version cannot be replaced by different content.')
         archive = self.cache / (manifest['sha256'] + '.tar.gz')
         if not archive.is_file() or hashlib.sha256(fetch(archive)).hexdigest() != manifest['sha256']:
@@ -238,7 +277,8 @@ class Releases:
         if archive.stat().st_size != manifest['size']:
             raise ManagerError('integrity', 'Cached archive size mismatch.')
         atomic_json(self.root / 'checked.json', {'raw': base64.b64encode(raw).decode(),
-                                               'signature': base64.b64encode(signature).decode()})
+                                               'signature': base64.b64encode(signature).decode(),
+                                               'channel': channel})
         return manifest
 
     def stage(self, manifest):
@@ -346,9 +386,9 @@ class Releases:
         return {'state': 'rolled_back' if rollback else 'updated',
                 'version': manifest['version'] if manifest else 'installed', 'backup': backup}
 
-    def apply(self, offline=False):
+    def apply(self, offline=False, confirm_prerelease=None, *, stable_only=False):
         self.recover()
-        manifest = self.check(offline)
+        manifest = self.check(offline, confirm_prerelease, stable_only=stable_only)
         if self.active() and self.active()['sha256'] == manifest['sha256']:
             return {'state': 'unchanged', 'version': manifest['version']}
         self.stage(manifest)

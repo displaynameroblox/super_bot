@@ -423,7 +423,10 @@ def serve_model(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="For developer diagnostics, run super-bot-manager doctor or super-bot-manager debug --help.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     download = commands.add_parser("download", help="Download one model file from Hugging Face")

@@ -131,7 +131,7 @@ def create_app(host: Host, runtime=None) -> FastAPI:
     def descriptor():
         return {**node, "status": "ready", "sdk_versions": [],
                 "sbp_versions": c.ProtocolInfo().versions, "sbp_path": prefix,
-                "features": ["minecraft.private_chat"]}
+                "features": ["minecraft.private_chat", "minecraft.movement_gate"]}
 
     @app.get("/health", response_model=c.Status)
     def health():
@@ -144,6 +144,16 @@ def create_app(host: Host, runtime=None) -> FastAPI:
     @app.get(prefix + "/models", response_model=c.ModelRoutes)
     def models(credential=Depends(token)):
         return host.invoke(credential, "models", registered=tuple(runtime.models))
+
+    movement_path = prefix + "/environments/{environment_id}/agents/{agent_id}/movement-gate"
+
+    @app.get(movement_path, response_model=c.MovementGate)
+    def get_movement_gate(environment_id: c.Id, agent_id: c.Id, credential=Depends(token)):
+        return host.invoke(credential, "movement_gate", environment_id=environment_id, agent_id=agent_id)
+
+    @app.put(movement_path, response_model=c.MovementGate)
+    def set_movement_gate(environment_id: c.Id, agent_id: c.Id, req: c.MovementGate, credential=Depends(token)):
+        return host.invoke(credential, "movement_gate", environment_id=environment_id, agent_id=agent_id, req=req)
 
     @app.post(prefix + "/sessions", response_model=c.SessionGrant)
     def session(req: c.SessionRequest, credential=Depends(token)):

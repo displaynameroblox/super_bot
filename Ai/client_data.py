@@ -9,6 +9,7 @@ import atexit
 import contextlib
 import hashlib
 import json
+import os
 import secrets
 import threading
 import shutil
@@ -16,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from Ai import accounts, auth, chat_training, database, knowledge, profile_store, session_store
+from Ai import accounts, auth, chat_training, database, knowledge, miso_memory, profile_store, session_store
 
 
 class LocalClient:
@@ -45,6 +46,11 @@ class LocalClient:
     def training_database(self, user_id):
         return self.directory / "training" / str(user_id or "guest") / "chat-exchanges.sqlite"
 
+    def _shared_memory(self):
+        if os.environ.get("SUPER_BOT_MISO_MEMORY") == "0":
+            return None
+        return miso_memory.MemoryStore.enabled(self.db)
+
     def _user(self, token):
         user = self.accounts.authenticate(token)
         if user is None:
@@ -66,7 +72,7 @@ class LocalClient:
                 "AI_skills": json.loads(row["ai_skills_json"]),
                 "messages": json.loads(messages[0]) if messages else [], "owner": row["owner_user_id"]}
 
-    def _save(self, data, owner=None):
+    def _save(self, data, owner=None, *, memory_exchange=None):
         with self.db.connection() as db:
             self.sessions.save(data["session_ID"], chat_log=data["Chat_log"], ai_persona=data["AI_persona"],
                                plr_name=data["plr_name"], ai_style=data.get("AI_style", ""),
@@ -76,6 +82,9 @@ class LocalClient:
                        (data["session_ID"], json.dumps(data.get("messages", []), ensure_ascii=False)))
             if data.get("exchange_id"):
                 db.execute("INSERT OR IGNORE INTO client_exchanges VALUES (?, ?)", (data["session_ID"], data["exchange_id"]))
+            if memory_exchange is not None:
+                memory, token, prompt, reply = memory_exchange
+                memory.save_account(db, token, data["exchange_id"], str(data["session_ID"]), prompt, reply)
 
     @staticmethod
     def _append_exchange(record, message, reply, player_name=None):
@@ -211,6 +220,28 @@ class LocalClient:
                 self._end_invalid_logins(url)
                 return 200, {"ok": True}
             user = self._user(token)
+            if route in {"miso/link", "miso/unlink", "miso/publish"}:
+                memory = self._shared_memory()
+                if memory is None:
+                    return 409, {"detail": "Enable shared Miso memory for this TUI database first."}
+                if route == "miso/unlink":
+                    memory.unlink(token)
+                    return 200, {"ok": True}
+                from Ai.chat_app import ChatApp, default_data_file, load_profiles
+
+                profile_path = body.get("profiles_file")
+                profiles = load_profiles(Path(profile_path) if profile_path else default_data_file().with_name("chat_profiles.json"))
+                profile = profiles.profiles.get(body.get("profile_name"))
+                if profile is None:
+                    raise ValueError("Select a saved Miso profile first.")
+                configuration = (
+                    ChatApp._profile_persona(profile), profile.player_name, profile.style, profile.chat_skills,
+                )
+                if route == "miso/publish":
+                    memory.publish_configuration(token, configuration)
+                    return 200, {"ok": True}
+                code = memory.issue_link(token, str(body.get("discord_id", "")), configuration)
+                return 200, {"code": code}
             if route == "me":
                 return 200, {"user_id": user.id, "username": user.username, "profile": self.profiles.get(user.id)}
             if route == "profile":
@@ -287,12 +318,22 @@ class LocalClient:
         record = self._record(body.get("ses_id")) if path in {"/chat", "/style", "/skills"} else None
         if record and record["owner"] is not None:
             local_login = self.active_logins.get(record["session_ID"])
-            if not local_login or self.accounts.authenticate(local_login) is None:
+            user = self.accounts.authenticate(local_login)
+            if user is None or user.id != record["owner"]:
                 self.leave(url, record["session_ID"])
                 return 401, {"detail": "Please sign in and reopen this local chat"}
+        shared_memory = None
         if path == "/chat" and record:
             library = self.library(record["owner"]) if record["owner"] else self.directory / "knowledge.db"
             body = {**body, "knowledge_context": knowledge.format_context(knowledge.search(library, body.get("msg", "")))[:6000]}
+            if record["owner"] is not None:
+                shared_memory = self._shared_memory()
+                if shared_memory:
+                    body["private_memory_context"] = shared_memory.account_prompt(local_login, body.get("msg", ""))
+                else:
+                    miso_memory.log_prompt("tui", None, reason="memory-disabled")
+            else:
+                miso_memory.log_prompt("tui", None, reason="guest-chat")
         status, result = self.send(url, method, path, body or None, token, timeout=timeout, **kwargs)
         if status != 200 or not isinstance(result, dict):
             return status, result
@@ -317,7 +358,12 @@ class LocalClient:
             else:
                 # A malformed response must never replace the durable transcript.
                 return 502, {"detail": "The model reply was missing. Saved history was not changed."}
-            self._save(result, record["owner"])
+            memory_exchange = None
+            if shared_memory and result.get("exchange_id"):
+                memory_exchange = (shared_memory, local_login, body["msg"], reply)
+            self._save(result, record["owner"], memory_exchange=memory_exchange)
+            if record["owner"] is None and self.accounts.authenticate(self._current_account_token):
+                result["local_guest_chat"] = True
         elif path in {"/style", "/skills"} and record:
             record.update(result)
             self._save(record, record["owner"])

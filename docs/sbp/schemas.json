@@ -937,6 +937,20 @@
       "title": "ModelRoutes",
       "type": "object"
     },
+    "MovementGate": {
+      "additionalProperties": false,
+      "properties": {
+        "paused": {
+          "title": "Paused",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paused"
+      ],
+      "title": "MovementGate",
+      "type": "object"
+    },
     "NodeDescriptor": {
       "additionalProperties": false,
       "properties": {
