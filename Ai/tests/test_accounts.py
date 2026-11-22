@@ -1,3 +1,4 @@
+from contextlib import closing
 import os
 import sqlite3
 import tempfile
@@ -219,7 +220,8 @@ class DatabaseTests(TempDatabaseCase):
         self.assertEqual(
             session_store.SessionStore(reopened).get_for_user(user.id, 5)["chat_log"], "hello"
         )
-        self.assertEqual(database.schema_version(sqlite3.connect(self.path)), database.LATEST_VERSION)
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(database.schema_version(connection), database.LATEST_VERSION)
         if os.name != "nt":
             self.assertEqual(self.path.stat().st_mode & 0o077, 0)
             self.assertEqual(self.path.parent.stat().st_mode & 0o077, 0)
@@ -299,7 +301,7 @@ class BackupTests(TempDatabaseCase):
             with self.assertRaises(backup.BackupError):
                 backup.restore_backup(bogus, self.path)
         unrelated = self.directory / "other.db"
-        with sqlite3.connect(unrelated) as connection:
+        with closing(sqlite3.connect(unrelated)) as connection, connection:
             connection.execute("CREATE TABLE t (x)")
         with self.assertRaises(backup.BackupError):
             backup.restore_backup(unrelated, self.path)
@@ -321,7 +323,7 @@ class BackupTests(TempDatabaseCase):
 
     def test_a_backup_from_a_newer_version_is_refused(self) -> None:
         snapshot = backup.create_backup(self.path)
-        with sqlite3.connect(snapshot) as connection:
+        with closing(sqlite3.connect(snapshot)) as connection, connection:
             connection.execute("PRAGMA user_version = 999")
         with self.assertRaisesRegex(backup.BackupError, "newer"):
             backup.restore_backup(snapshot, self.path)

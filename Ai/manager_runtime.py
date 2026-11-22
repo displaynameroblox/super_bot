@@ -113,6 +113,7 @@ class Runtime:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.timeout = timeout
+        self._worker = None
 
     def status(self):
         state = read_json(self.root / 'process.json', {})
@@ -168,6 +169,7 @@ class Runtime:
                         except KeyboardInterrupt:
                             self.stop()
                             return {'state': 'stopped'}
+                    self._worker = process
                     return self.status()
                 time.sleep(.1)
             raise ManagerError('startup_failed', f'Server did not become ready. See {self.root / "server.log"}', 4)
@@ -187,6 +189,7 @@ class Runtime:
 
     def stop(self):
         if not locked(self.root / 'server.lock'):
+            self._wait_for_worker(self.timeout)
             return {'state': 'stopped'}
         state = read_json(self.root / 'process.json', {})
         if not state.get('startup_id'):
@@ -195,6 +198,15 @@ class Runtime:
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             if not locked(self.root / 'server.lock'):
+                self._wait_for_worker(max(0, deadline - time.monotonic()))
                 return {'state': 'stopped'}
             time.sleep(.1)
         raise ManagerError('stop_timeout', 'Graceful shutdown timed out; update was not activated.', 4)
+
+    def _wait_for_worker(self, timeout):
+        if self._worker is not None:
+            try:
+                self._worker.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise ManagerError('stop_timeout', 'Server process did not exit after shutdown.', 4) from exc
+            self._worker = None

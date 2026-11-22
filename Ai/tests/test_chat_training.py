@@ -26,9 +26,11 @@ class ChatTrainingTests(unittest.TestCase):
                 "Can you keep answers brief?",
                 "Sure, I will be concise.",
             )
-            self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
             self.assertEqual(chat_training.export_exchanges(database, output), 1)
-            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
             rows = [json.loads(line) for line in output.read_text().splitlines()]
             self.assertEqual(len(rows), 1)
             self.assertEqual(

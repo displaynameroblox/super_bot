@@ -1,3 +1,4 @@
+from contextlib import closing
 import asyncio
 import os
 import sqlite3
@@ -255,7 +256,7 @@ class ClientOwnedDataTests(unittest.TestCase):
         knowledge.add_document(db, source_url="local:new", title="New", content="newgalaxy", category="general")
         self.assertEqual(knowledge.search(db, "obsoletequasar"), [])
         self.assertEqual(len(knowledge.search(db, "newgalaxy")), 1)
-        with sqlite3.connect(db) as connection:
+        with closing(sqlite3.connect(db)) as connection, connection:
             self.assertEqual(connection.execute("SELECT count(*) FROM passages_fts").fetchone()[0], 1)
 
     def test_missing_optional_personality_file_is_ignored(self):

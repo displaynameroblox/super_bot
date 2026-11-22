@@ -93,6 +93,9 @@ def create_app(host: Host, runtime=None) -> FastAPI:
         from .runtime import Runtime
         runtime = Runtime(host)
     errors = {status: {"model": c.ErrorResponse} for status in (400, 401, 403, 404, 409, 413, 422, 426, 429, 500, 502)}
+    # HTTP reason phrases changed between supported Python versions.
+    errors[413]["description"] = "Content Too Large"
+    errors[422]["description"] = "Unprocessable Content"
     app = FastAPI(title="Super-Bot Protocol", version="0.1", docs_url=None, redoc_url=None, responses=errors)
     app.state.host, app.state.runtime = host, runtime
     app.add_middleware(RequestBoundary, maximum=host.limits.max_body_bytes,

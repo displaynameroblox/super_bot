@@ -1,3 +1,4 @@
+import os
 import json
 import tempfile
 import unittest
@@ -176,7 +177,8 @@ class ClientStorageTests(unittest.TestCase):
             self.assertEqual(load_chat_skills(path), {})
             save_chat_skills(path, {"pirate": "Arr."})
             self.assertEqual(load_chat_skills(path), {"pirate": "Arr."})
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_invalid_library_file_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
